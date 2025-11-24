@@ -26,7 +26,7 @@ import org.springframework.lang.Nullable;
 /**
  * Converts Valkey-Glide exceptions to Spring DAO exceptions.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideExceptionConverter {

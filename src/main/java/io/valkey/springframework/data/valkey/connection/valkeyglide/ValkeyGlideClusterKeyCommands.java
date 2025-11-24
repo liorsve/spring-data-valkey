@@ -32,7 +32,7 @@ import org.springframework.util.Assert;
  * This implementation handles cross-slot operations by executing commands separately
  * and aggregating results when keys map to different cluster slots.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideClusterKeyCommands extends ValkeyGlideKeyCommands {

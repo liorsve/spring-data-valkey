@@ -41,7 +41,7 @@ import io.valkey.springframework.data.valkey.connection.util.ByteArraySet;
  * This implementation handles multi-slot routing by fetching set members from different
  * cluster nodes in parallel and performing set operations locally.
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideClusterSetCommands extends ValkeyGlideSetCommands {

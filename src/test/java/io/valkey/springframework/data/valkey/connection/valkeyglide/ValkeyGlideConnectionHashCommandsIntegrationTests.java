@@ -45,7 +45,7 @@ import io.valkey.springframework.data.valkey.core.ScanOptions;
  * - Field length operations (hStrLen)
  * - Field expiration operations (hExpire, hpExpire, hExpireAt, hpExpireAt, hPersist, hTtl, hpTtl)
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideConnectionHashCommandsIntegrationTests extends AbstractValkeyGlideIntegrationTests {

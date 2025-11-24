@@ -55,7 +55,7 @@ import glide.api.models.GlideString;
  * Connection to a Valkey server using Valkey-Glide client. The connection
  * adapts Valkey-Glide's asynchronous API to Spring Data Valkey's synchronous API.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  */
 public class ValkeyGlideConnection extends AbstractValkeyConnection {
 

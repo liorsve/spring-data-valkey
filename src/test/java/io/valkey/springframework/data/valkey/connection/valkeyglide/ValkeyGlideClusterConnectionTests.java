@@ -84,7 +84,7 @@ import io.valkey.springframework.data.valkey.connection.valkeyglide.extension.Va
  * @author Pavel Khokhlov
  * @author Dennis Neufeld
  * @author Tihomir Mateev
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  */
 @EnabledOnValkeyClusterAvailable
 @ExtendWith(ValkeyGlideConnectionFactoryExtension.class)

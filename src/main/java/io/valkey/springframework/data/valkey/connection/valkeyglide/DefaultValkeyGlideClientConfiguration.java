@@ -25,7 +25,7 @@ import org.springframework.lang.Nullable;
 /**
  * Default implementation of {@link ValkeyGlideClientConfiguration}.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class DefaultValkeyGlideClientConfiguration implements ValkeyGlideClientConfiguration {

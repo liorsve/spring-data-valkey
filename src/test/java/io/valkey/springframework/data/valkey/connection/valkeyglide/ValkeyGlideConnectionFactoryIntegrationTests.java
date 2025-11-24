@@ -44,7 +44,7 @@ import io.valkey.springframework.data.valkey.serializer.StringValkeySerializer;
 /**
  * Integration tests for {@link ValkeyGlideConnectionFactory}.
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  */
 @TestInstance(Lifecycle.PER_CLASS)
 public class ValkeyGlideConnectionFactoryIntegrationTests {

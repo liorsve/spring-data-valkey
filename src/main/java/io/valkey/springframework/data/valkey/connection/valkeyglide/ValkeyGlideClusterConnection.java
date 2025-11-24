@@ -60,7 +60,7 @@ import io.valkey.springframework.data.valkey.core.ScanOptions;
  * adding cluster-specific functionality. Also implements {@link ClusterTopologyProvider}
  * to provide cluster topology information.
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideClusterConnection extends ValkeyGlideConnection implements ValkeyClusterConnection, ClusterTopologyProvider {

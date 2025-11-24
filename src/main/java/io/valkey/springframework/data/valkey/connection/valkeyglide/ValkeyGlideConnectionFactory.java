@@ -65,7 +65,7 @@ import java.util.concurrent.ExecutionException;
  * or {@link #ValkeyGlideConnectionFactory(ValkeyGlideClientConfiguration)} constructor. For cluster mode,
  * ensure the {@link ValkeyGlideClientConfiguration} is configured for cluster mode.
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideConnectionFactory

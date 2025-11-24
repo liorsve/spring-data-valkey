@@ -25,7 +25,7 @@ import org.springframework.lang.Nullable;
 /**
  * Configuration interface for Valkey-Glide client settings.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public interface ValkeyGlideClientConfiguration {

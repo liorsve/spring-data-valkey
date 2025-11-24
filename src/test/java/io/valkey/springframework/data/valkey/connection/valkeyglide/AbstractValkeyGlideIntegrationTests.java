@@ -52,7 +52,7 @@ import io.valkey.springframework.data.valkey.test.extension.ValkeyStanalone;
  * - Implement their command-specific test methods
  * - Call {@link #cleanupKey(String)} for individual key cleanup in tests
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 @TestInstance(Lifecycle.PER_CLASS)

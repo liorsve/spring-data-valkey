@@ -42,7 +42,7 @@ import io.valkey.springframework.data.valkey.test.condition.EnabledOnValkeyVersi
  * - Pipeline mode: Commands return null, results collected in closePipeline() 
  * - Transaction mode: Commands return null, results collected in exec()
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideConnectionKeyCommandsIntegrationTests extends AbstractValkeyGlideIntegrationTests {

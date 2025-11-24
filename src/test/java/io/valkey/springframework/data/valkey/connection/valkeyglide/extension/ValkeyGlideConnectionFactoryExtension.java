@@ -47,7 +47,7 @@ import org.springframework.data.util.Lazy;
  * <p><strong>Note:</strong> Sentinel configurations are not supported by Valkey-Glide and will throw an 
  * {@link UnsupportedOperationException}.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @see ValkeyStanalone
  * @see ValkeyCluster
  */

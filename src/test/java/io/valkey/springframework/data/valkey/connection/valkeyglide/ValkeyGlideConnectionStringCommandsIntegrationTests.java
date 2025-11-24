@@ -43,7 +43,7 @@ import io.valkey.springframework.data.valkey.core.types.Expiration;
  * - String manipulation (append, getRange, setRange, strLen)
  * - Bit operations (getBit, setBit, bitCount, bitField, bitOp, bitPos)
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideConnectionStringCommandsIntegrationTests extends AbstractValkeyGlideIntegrationTests {

@@ -23,7 +23,7 @@ import glide.api.models.GlideString;
  * Unified interface that abstracts both GlideClient and GlideClusterClient
  * to enable code reuse between standalone and cluster modes.
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 interface UnifiedGlideClient extends AutoCloseable {

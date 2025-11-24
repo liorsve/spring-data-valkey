@@ -62,7 +62,7 @@ import io.valkey.springframework.data.valkey.test.condition.EnabledOnValkeyClust
  *   </li>
  * </ul>
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 @EnabledOnValkeyClusterAvailable

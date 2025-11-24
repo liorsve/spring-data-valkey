@@ -54,7 +54,7 @@ import io.valkey.springframework.data.valkey.test.extension.ValkeyCluster;
  * - Implement their cluster command-specific test methods
  * - Call {@link #cleanupKey(String)} for individual key cleanup in tests
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 @EnabledOnValkeyClusterAvailable

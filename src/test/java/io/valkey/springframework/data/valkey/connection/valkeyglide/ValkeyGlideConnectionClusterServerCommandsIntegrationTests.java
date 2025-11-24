@@ -70,7 +70,7 @@ import io.valkey.springframework.data.valkey.test.condition.EnabledOnValkeyClust
  *   <li>1 Replica node: 7382 (replica of 7379)</li>
  * </ul>
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 @EnabledOnValkeyClusterAvailable

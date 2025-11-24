@@ -38,7 +38,7 @@ import glide.api.models.GlideString;
 /**
  * Implementation of {@link ValkeyKeyCommands} for Valkey-Glide.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideKeyCommands implements ValkeyKeyCommands {

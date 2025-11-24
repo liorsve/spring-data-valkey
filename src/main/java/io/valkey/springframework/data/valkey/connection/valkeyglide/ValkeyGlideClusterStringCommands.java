@@ -35,7 +35,7 @@ import glide.api.models.configuration.RequestRoutingConfiguration.ByAddressRoute
 /**
  * Implementation of {@link ValkeyStringCommands} for Valkey-Glide.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideClusterStringCommands extends ValkeyGlideStringCommands {

@@ -37,7 +37,7 @@ import glide.api.models.GlideString;
 /**
  * Converter utilities for mapping between Spring Data Valkey types and Valkey-Glide types.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public abstract class ValkeyGlideConverters {

@@ -43,7 +43,7 @@ import glide.api.models.GlideString;
 /**
  * Implementation of {@link ValkeyHashCommands} for Valkey-Glide.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideHashCommands implements ValkeyHashCommands {

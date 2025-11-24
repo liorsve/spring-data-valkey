@@ -53,7 +53,7 @@ import io.valkey.springframework.data.valkey.test.condition.EnabledOnValkeyClust
  *   <li>Pipeline operations have limited support in cluster mode and are omitted.</li>
  * </ul>
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 @EnabledOnValkeyClusterAvailable

@@ -38,7 +38,7 @@ import io.valkey.springframework.data.valkey.core.types.ValkeyClientInfo;
  * Implementation of {@link ValkeyClusterServerCommands} for Valkey-Glide.
  * Uses the elegant execute(Route, ...) pattern for cluster command routing.
  *
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 public class ValkeyGlideClusterServerCommands implements ValkeyClusterServerCommands {

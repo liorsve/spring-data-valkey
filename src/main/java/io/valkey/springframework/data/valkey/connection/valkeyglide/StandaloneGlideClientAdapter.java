@@ -22,7 +22,7 @@ import glide.api.models.Batch;
 
 /**
  * 
- * @author Ilya Kolomin
+ * @author Ilia Kolominsky
  * @since 2.0
  */
 class StandaloneGlideClientAdapter implements UnifiedGlideClient {
