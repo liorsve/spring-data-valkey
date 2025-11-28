@@ -1,16 +1,19 @@
 # Spring Data Valkey
 
-The primary goal of the [Spring Data](https://spring.io/projects/spring-data/) project is to make it easier to build Spring-powered applications that use new data access technologies such as non-relational databases, map-reduce frameworks, and cloud based data services.
+Spring Data Valkey is a dedicated integration module for the [Valkey](https://valkey.io/)
+ data store, a high-performance, Redis-compatible in-memory database.
+The project is a fork of Spring Data Redis 3.5.1, created to offer first-class support for Valkey and to ensure seamless, optimized access to the Valkey ecosystem.
 
-This module provides integration with the [Valkey](https://valkey.io/) store, a high-performance data structure server that is fully compatible with Redis.
+This module is purpose-built to provide the best possible experience when using Valkey from Spring applications, leveraging the specialized [Valkey-GLIDE](https://github.com/valkey-io/valkey-glide)
+ client library for high-performance, cross-language connectivity. By aligning API compatibility with Spring Data Redis, Spring Data Valkey enables developers to migrate with minimal friction while benefiting from improved performance, modern driver capabilities, and long-term support for the Valkey platform.
 
 ## Features
 
 * Connection package as low-level abstraction across multiple drivers ([Valkey GLIDE](https://github.com/valkey-io/valkey-glide), [Lettuce](https://github.com/lettuce-io/lettuce-core), and [Jedis](https://github.com/redis/jedis)).
 * Exception translation to Spring's portable Data Access exception hierarchy for driver exceptions.
 * `ValkeyTemplate` that provides a high level abstraction for performing various Valkey operations, exception translation and serialization support.
-* Pubsub support (such as a MessageListenerContainer for message-driven POJOs).
-* Valkey Sentinel and Valkey Cluster support.
+* Pubsub support (such as a MessageListenerContainer for message-driven POJOs). Available with Jedis and Lettuce, with Valkey GLIDE support WIP for version 1.0.0.
+* Valkey Sentinel and Valkey Cluster support. Available with Jedis and Lettuce, with Valkey GLIDE support planned in the future
 * Reactive API using Lettuce.
 * JDK, String, JSON and Spring Object/XML mapping serializers.
 * JDK Collection implementations on top of Valkey.
@@ -116,7 +119,7 @@ $ ./mvnw clean install
 
 If you want to build with the regular `mvn` command, you will need [Maven v3.8.0 or above](https://maven.apache.org/run-maven/index.html).
 
-## Generating a Release
+<!-- ## Generating a Release - This should go to a developer readme
 
 In order to generate a new release, create and push a tag to the main branch.  This will build and test the project and add the artifacts to a draft release.  Verify the release and then publish it.
 
@@ -125,7 +128,7 @@ For example:
 ```bash
 $ git tag v1.0
 $ git push origin v1.0
-```
+``` -->
 
 ## Migration from Spring Data Redis
 
