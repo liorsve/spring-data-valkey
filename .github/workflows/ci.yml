@@ -93,7 +93,7 @@ jobs:
         run: |
           make start PROJECT=${{ matrix.engine }} VERSION=${{ matrix.version }} GH_ORG=${{ matrix.engine == 'redis' && 'redis' || 'valkey-io' }}
 
-      - name: Test baseline
+      - name: Test Spring Data Valkey
         run: |
           ./mvnw -s settings.xml \
             -Ddevelocity.storage.directory=$HOME/.develocity-root \
@@ -101,6 +101,24 @@ jobs:
             test -Pnone \
             -DrunLongTests=true \
             -Dvalkey.server.version=${{ matrix.version }} \
+            -U -B
+
+      - name: Install Spring Data Valkey
+        run: |
+          ./mvnw -s settings.xml \
+            -Ddevelocity.storage.directory=$HOME/.develocity-root \
+            -Dmaven.repo.local=$HOME/.m2/spring-data-valkey \
+            install -DskipTests \
+            -Dgpg.skip=true \
+            -B
+
+      - name: Test Spring Boot Starter
+        run: |
+          cd spring-boot-starter-data-valkey
+          ../mvnw -s ../settings.xml \
+            -Ddevelocity.storage.directory=$HOME/.develocity-root \
+            -Dmaven.repo.local=$HOME/.m2/spring-data-valkey \
+            test \
             -U -B
 
   ci-runtimehints-tests:
