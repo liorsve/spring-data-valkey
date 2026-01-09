@@ -41,6 +41,7 @@ import org.springframework.util.StringUtils;
 // Imports for valkey-glide library
 import glide.api.GlideClient;
 import glide.api.GlideClusterClient;
+import glide.api.models.GlideString;
 import glide.api.models.configuration.AdvancedGlideClientConfiguration;
 import glide.api.models.configuration.AdvancedGlideClusterClientConfiguration;
 import glide.api.models.configuration.BackoffStrategy;
@@ -48,10 +49,15 @@ import glide.api.models.configuration.GlideClientConfiguration;
 import glide.api.models.configuration.GlideClusterClientConfiguration;
 import glide.api.models.configuration.NodeAddress;
 import glide.api.models.configuration.ReadFrom;
+import glide.api.models.configuration.StandaloneSubscriptionConfiguration;
+import glide.api.models.configuration.ClusterSubscriptionConfiguration;
 
+import java.util.Map;
+import java.util.Set;
 import java.util.LinkedList;
 import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -90,6 +96,8 @@ public class ValkeyGlideConnectionFactory
     private boolean autoStartup = true;
     private boolean earlyStartup = true;
     private int phase = 0;
+
+    private final Map<Object, DelegatingPubSubListener> clientListenerMap = new ConcurrentHashMap<>();
 
     /**
      * Constructs a new {@link ValkeyGlideConnectionFactory} instance with default settings.
@@ -235,8 +243,11 @@ public class ValkeyGlideConnectionFactory
             client = createGlideClient();
         }
 
+        // Get the listener associated with this client
+        DelegatingPubSubListener listener = clientListenerMap.get(client);
+
         // Return a new connection wrapper around the pooled client
-        return new ValkeyGlideConnection(new StandaloneGlideClientAdapter(client), this);
+        return new ValkeyGlideConnection(new StandaloneGlideClientAdapter(client), this, listener);
     }
 
     @Override
@@ -253,8 +264,11 @@ public class ValkeyGlideConnectionFactory
             client = createGlideClusterClient();
         }
         
+        // Get the listener associated with this client
+        DelegatingPubSubListener listener = clientListenerMap.get(client);
+        
         // Return a new connection wrapper around the pooled cluster client
-        return new ValkeyGlideClusterConnection(new ClusterGlideClientAdapter(client), this);
+        return new ValkeyGlideClusterConnection(new ClusterGlideClientAdapter(client), this, listener);
     }
 
     @Override
@@ -378,10 +392,26 @@ public class ValkeyGlideConnectionFactory
             if (reconnectStrategy != null) {
                 configBuilder.reconnectStrategy(reconnectStrategy);
             }
+
+            // Pubsub listener 
+            DelegatingPubSubListener clientListener = new DelegatingPubSubListener();
+
             
+            // Configure pub/sub with callback for event-driven message delivery
+            var subConfigBuilder = StandaloneSubscriptionConfiguration.builder();            
+            
+            // Set callback that delegates to our listener holder
+            subConfigBuilder.callback((msg, context) -> clientListener.onMessage(msg, context));
+            configBuilder.subscriptionConfiguration(subConfigBuilder.build());
+
             // Build and create client
             GlideClientConfiguration config = configBuilder.build();
-            return GlideClient.createClient(config).get();
+            GlideClient client = GlideClient.createClient(config).get();
+
+            // Save the mapping of this client to its DelegatingListener
+            clientListenerMap.put(client, clientListener);
+
+            return client;
         } catch (Exception e) {
             throw new IllegalStateException("Failed to create GlideClient: " + e.getMessage(), e);
         }
@@ -477,10 +507,24 @@ public class ValkeyGlideConnectionFactory
                 configBuilder.reconnectStrategy(reconnectStrategy);
             }
             
+
+            DelegatingPubSubListener clientListener = new DelegatingPubSubListener();
+
+            // Configure pub/sub with callback for event-driven message delivery
+            var subConfigBuilder = ClusterSubscriptionConfiguration.builder();
+            
+            // Set callback that delegates to our listener holder
+            subConfigBuilder.callback((msg, context) -> clientListener.onMessage(msg, context));
+            configBuilder.subscriptionConfiguration(subConfigBuilder.build());
+
+            
             // Build and create cluster client
             GlideClusterClientConfiguration config = configBuilder.build();
-            return GlideClusterClient.createClient(config).get();
+            GlideClusterClient client = GlideClusterClient.createClient(config).get();
+
+            clientListenerMap.put(client, clientListener);
             
+            return client;
         } catch (InterruptedException | ExecutionException e) {
             throw new IllegalStateException("Failed to create GlideClusterClient: " + e.getMessage(), e);
         }

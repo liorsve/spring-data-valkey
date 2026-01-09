@@ -83,15 +83,31 @@ public class ValkeyGlideClusterConnection extends ValkeyGlideConnection implemen
     private final ValkeyGlideClusterSetCommands clusterSetCommands;
 
     public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter) {
-        this(clusterAdapter, null, Duration.ofMillis(100));
+        this(clusterAdapter, null, null, Duration.ofMillis(100));
     }
 
-    public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter, @Nullable ValkeyGlideConnectionFactory factory) {
-        this(clusterAdapter, factory, Duration.ofMillis(100));
+    public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter, 
+            @Nullable ValkeyGlideConnectionFactory factory) {
+        this(clusterAdapter, factory, null, Duration.ofMillis(100));
     }
 
-    public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter, @Nullable ValkeyGlideConnectionFactory factory, Duration cacheTimeout) {
-        super(clusterAdapter, factory);
+    public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter, 
+            @Nullable ValkeyGlideConnectionFactory factory,
+            @Nullable DelegatingPubSubListener pubSubListener) {
+        this(clusterAdapter, factory, pubSubListener, Duration.ofMillis(100));
+    }
+
+    public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter, 
+            @Nullable ValkeyGlideConnectionFactory factory, 
+            Duration cacheTimeout) {
+        this(clusterAdapter, factory, null, cacheTimeout);
+    }
+
+    public ValkeyGlideClusterConnection(ClusterGlideClientAdapter clusterAdapter, 
+            @Nullable ValkeyGlideConnectionFactory factory,
+            @Nullable DelegatingPubSubListener pubSubListener,
+            Duration cacheTimeout) {
+        super(clusterAdapter, factory, pubSubListener);
         Assert.notNull(cacheTimeout, "CacheTimeout must not be null!");
         
         this.clusterAdapter = clusterAdapter;
