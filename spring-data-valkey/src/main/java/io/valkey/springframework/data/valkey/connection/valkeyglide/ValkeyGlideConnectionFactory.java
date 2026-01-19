@@ -18,6 +18,9 @@ package io.valkey.springframework.data.valkey.connection.valkeyglide;
 import java.time.Duration;
 import java.util.concurrent.ExecutionException;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.context.SmartLifecycle;
@@ -88,7 +91,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class ValkeyGlideConnectionFactory
     implements ValkeyConnectionFactory, InitializingBean, DisposableBean, SmartLifecycle {
-        
+
+    private static final Log logger = LogFactory.getLog(ValkeyGlideConnectionFactory.class);
+
     private final @Nullable ValkeyGlideClientConfiguration valkeyGlideConfiguration;
     private final ValkeyConfiguration configuration;
     
@@ -725,7 +730,10 @@ public class ValkeyGlideConnectionFactory
      * @since 3.2
      */
     public void setExecutor(AsyncTaskExecutor executor) {
-        Assert.notNull(executor, "AsyncTaskExecutor must not be null");
+        if (executor != null) {
+            logger.warn("AsyncTaskExecutor configuration ignored for Valkey-Glide. " +
+                "Valkey-Glide provides async operations via CompletableFuture internally.");
+        }
         this.executor = executor;
     }
 
