@@ -255,6 +255,27 @@ Valkey metrics are automatically collected when Micrometer is present:
 
 View metrics at `/actuator/metrics/valkey.*` or integrate with monitoring systems like Prometheus.
 
+## OpenTelemetry Integration
+
+The starter provides automatic OpenTelemetry instrumentation when using the Valkey GLIDE client. Valkey GLIDE has built-in OpenTelemetry support that can be enabled via Spring Boot properties - no additional dependencies are required.
+
+Configure OpenTelemetry in `application.properties`:
+
+```properties
+# Enable OpenTelemetry instrumentation in GLIDE
+spring.data.valkey.valkey-glide.open-telemetry.enabled=true
+
+# Configure trace and metric endpoints
+spring.data.valkey.valkey-glide.open-telemetry.traces-endpoint=http://localhost:4318/v1/traces
+spring.data.valkey.valkey-glide.open-telemetry.metrics-endpoint=http://localhost:4318/v1/metrics
+
+# Optionally configure sampling and flush behavior
+spring.data.valkey.valkey-glide.open-telemetry.sample-percentage=10
+spring.data.valkey.valkey-glide.open-telemetry.flush-interval-ms=50
+```
+
+Automatically collected telemetry includes command duration, success/failure rates, connection pool metrics, and distributed traces. For local development, use Docker Compose with an OpenTelemetry Collector to view traces and metrics.
+
 ## Testing
 
 ### @DataValkeyTest
