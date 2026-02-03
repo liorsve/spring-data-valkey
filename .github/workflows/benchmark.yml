@@ -4,16 +4,43 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - add-benchmark-ci 
+      - add-benchmark-ci
 
 jobs:
   test:
     runs-on: [self-hosted, Linux, x86, ephemeral, metal]
+    timeout-minutes: 60
+    
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Verify metal instance
         run: |
           echo "Running on metal instance"
           lscpu | grep "Model name"
           nproc
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Start Valkey infrastructure on dedicated cores (0-3)
+        run: |
+          taskset -c 0-3 make start
+          sleep 2
+          
+          # Verify servers are running
+          work/valkey/bin/valkey-cli -p 6379 ping
+          work/valkey/bin/valkey-cli -p 7379 cluster info | head -5
+
+      - name: Run tests on remaining cores (4-47)
+        run: |
+          taskset -c 4-47 ./mvnw clean test -U
+
+      - name: Stop Valkey infrastructure
+        if: always()
+        run: |
+          make stop
+          make clean
