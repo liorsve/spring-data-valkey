@@ -6,14 +6,8 @@ Benchmark runner that orchestrates:
 3. Collecting system metrics (perf, CPU, disk I/O, network)
 4. Outputting results to JSON
 
-Includes variance control:
-- Turbo boost disabled
-- Network delay simulation (tc netem)
-- CPU core pinning
-
-Monitors benchmark CSV for phase transitions:
-- Starts monitoring when WARMUP phase is done
-- Stops monitoring when STEADY phase is done
+Reads configuration from external JSON files.
+Phase completion is determined by workload config (duration or requests).
 """
 
 import argparse
@@ -31,19 +25,23 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Tuple
 
 
 def generate_job_id():
-    """Generate job ID in format: bench-YYYYMMDD-HHMMSS-random6"""
     now = datetime.now(timezone.utc)
     random_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     return f"bench-{now.strftime('%Y%m%d-%H%M%S')}-{random_suffix}"
 
 
 def get_timestamp():
-    """Get current timestamp in ISO 8601 format"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json_config(filepath: Path) -> dict:
+    """Load JSON configuration file"""
+    with open(filepath) as f:
+        return json.load(f)
 
 
 class VarianceControl:
@@ -56,7 +54,6 @@ class VarianceControl:
         self.nmi_watchdog_original = None
 
     def setup(self, network_delay_ms: int = 1):
-        """Apply all variance control settings"""
         print("Setting up variance control...")
         self._disable_turbo_boost()
         self._setup_network_delay(network_delay_ms)
@@ -65,7 +62,6 @@ class VarianceControl:
         print("Variance control setup complete")
 
     def teardown(self):
-        """Restore all original settings"""
         print("Restoring system settings...")
         self._restore_turbo_boost()
         self._remove_network_delay()
@@ -73,7 +69,6 @@ class VarianceControl:
         print("System settings restored")
 
     def _disable_turbo_boost(self):
-        """Disable CPU turbo boost for frequency stability"""
         intel_path = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
         amd_path = Path("/sys/devices/system/cpu/cpufreq/boost")
 
@@ -81,28 +76,19 @@ class VarianceControl:
             if intel_path.exists():
                 self.turbo_boost_path = intel_path
                 self.original_turbo_state = intel_path.read_text().strip()
-                subprocess.run(
-                    ["sudo", "tee", str(intel_path)],
-                    input=b"1",
-                    capture_output=True
-                )
+                subprocess.run(["sudo", "tee", str(intel_path)], input=b"1", capture_output=True)
                 print("  ✓ Intel Turbo Boost disabled")
             elif amd_path.exists():
                 self.turbo_boost_path = amd_path
                 self.original_turbo_state = amd_path.read_text().strip()
-                subprocess.run(
-                    ["sudo", "tee", str(amd_path)],
-                    input=b"0",
-                    capture_output=True
-                )
+                subprocess.run(["sudo", "tee", str(amd_path)], input=b"0", capture_output=True)
                 print("  ✓ AMD Boost disabled")
             else:
-                print("  ⚠ No turbo boost control found (may not be available)")
+                print("  ⚠ No turbo boost control found")
         except Exception as e:
             print(f"  ⚠ Could not disable turbo boost: {e}")
 
     def _restore_turbo_boost(self):
-        """Restore original turbo boost setting"""
         if self.turbo_boost_path and self.original_turbo_state:
             try:
                 subprocess.run(
@@ -115,19 +101,13 @@ class VarianceControl:
                 print(f"  ⚠ Could not restore turbo boost: {e}")
 
     def _setup_network_delay(self, delay_ms: int):
-        """Add artificial network delay on loopback for measurement stability"""
         try:
-            subprocess.run(
-                ["sudo", "tc", "qdisc", "del", "dev", "lo", "root"],
-                capture_output=True
-            )
-
+            subprocess.run(["sudo", "tc", "qdisc", "del", "dev", "lo", "root"], capture_output=True)
             result = subprocess.run(
                 ["sudo", "tc", "qdisc", "add", "dev", "lo", "root", "netem", "delay", f"{delay_ms}ms"],
                 capture_output=True,
                 text=True
             )
-
             if result.returncode == 0:
                 self.tc_configured = True
                 print(f"  ✓ Network delay configured: {delay_ms}ms on loopback")
@@ -137,34 +117,24 @@ class VarianceControl:
             print(f"  ⚠ Network delay setup failed: {e}")
 
     def _remove_network_delay(self):
-        """Remove artificial network delay"""
         if self.tc_configured:
             try:
-                subprocess.run(
-                    ["sudo", "tc", "qdisc", "del", "dev", "lo", "root"],
-                    capture_output=True
-                )
+                subprocess.run(["sudo", "tc", "qdisc", "del", "dev", "lo", "root"], capture_output=True)
                 print("  ✓ Network delay removed")
             except Exception as e:
                 print(f"  ⚠ Could not remove network delay: {e}")
 
     def _disable_nmi_watchdog(self):
-        """Disable NMI watchdog to free up PMU counter"""
         try:
             nmi_path = Path("/proc/sys/kernel/nmi_watchdog")
             if nmi_path.exists():
                 self.nmi_watchdog_original = nmi_path.read_text().strip()
-                subprocess.run(
-                    ["sudo", "tee", str(nmi_path)],
-                    input=b"0",
-                    capture_output=True
-                )
-                print("  ✓ NMI watchdog disabled (frees PMU counter)")
+                subprocess.run(["sudo", "tee", str(nmi_path)], input=b"0", capture_output=True)
+                print("  ✓ NMI watchdog disabled")
         except Exception as e:
             print(f"  ⚠ Could not disable NMI watchdog: {e}")
 
     def _restore_nmi_watchdog(self):
-        """Restore NMI watchdog"""
         if self.nmi_watchdog_original:
             try:
                 subprocess.run(
@@ -177,27 +147,12 @@ class VarianceControl:
                 print(f"  ⚠ Could not restore NMI watchdog: {e}")
 
     def _set_perf_permissions(self):
-        """Set kernel parameters for perf access"""
         try:
-            subprocess.run(
-                ["sudo", "sysctl", "-w", "kernel.perf_event_paranoid=-1"],
-                capture_output=True
-            )
-            subprocess.run(
-                ["sudo", "sysctl", "-w", "kernel.kptr_restrict=0"],
-                capture_output=True
-            )
+            subprocess.run(["sudo", "sysctl", "-w", "kernel.perf_event_paranoid=-1"], capture_output=True)
+            subprocess.run(["sudo", "sysctl", "-w", "kernel.kptr_restrict=0"], capture_output=True)
             print("  ✓ Perf permissions configured")
         except Exception as e:
             print(f"  ⚠ Could not set perf permissions: {e}")
-
-    def get_status(self) -> dict:
-        """Return current variance control status"""
-        return {
-            "turbo_boost_disabled": self.turbo_boost_path is not None,
-            "network_delay_configured": self.tc_configured,
-            "nmi_watchdog_disabled": self.nmi_watchdog_original is not None
-        }
 
 
 class CSVWatcher:
@@ -209,19 +164,14 @@ class CSVWatcher:
         self.steady_done_event = threading.Event()
         self.tail_process: Optional[subprocess.Popen] = None
         self.watcher_thread: Optional[threading.Thread] = None
-        self.header_seen = False
 
     def start(self):
         """Start watching the CSV file using tail -f"""
-        # Wait for file to exist first
-        timeout = 30
-        start = time.time()
+        # Wait for file to exist (no timeout - just wait)
+        print(f"Waiting for CSV file: {self.csv_path}")
         while not self.csv_path.exists():
-            if time.time() - start > timeout:
-                raise RuntimeError(f"Timeout waiting for CSV file: {self.csv_path}")
             time.sleep(0.1)
 
-        # Start tail -f process
         self.tail_process = subprocess.Popen(
             ["tail", "-f", "-n", "+1", str(self.csv_path)],
             stdout=subprocess.PIPE,
@@ -229,7 +179,6 @@ class CSVWatcher:
             text=True
         )
 
-        # Start reader thread
         self.watcher_thread = threading.Thread(target=self._read_loop, daemon=True)
         self.watcher_thread.start()
         print(f"Started watching CSV (tail -f): {self.csv_path}")
@@ -249,13 +198,13 @@ class CSVWatcher:
 
         print("CSV watcher stopped")
 
-    def wait_for_warmup_done(self, timeout: float = None) -> bool:
-        """Block until warmup phase is done"""
-        return self.warmup_done_event.wait(timeout=timeout)
+    def wait_for_warmup_done(self) -> None:
+        """Block until warmup phase is done (no timeout)"""
+        self.warmup_done_event.wait()
 
-    def wait_for_steady_done(self, timeout: float = None) -> bool:
-        """Block until steady phase is done"""
-        return self.steady_done_event.wait(timeout=timeout)
+    def wait_for_steady_done(self) -> None:
+        """Block until steady phase is done (no timeout)"""
+        self.steady_done_event.wait()
 
     def _read_loop(self):
         """Read lines from tail -f stdout"""
@@ -264,24 +213,18 @@ class CSVWatcher:
 
         for line in self.tail_process.stdout:
             line = line.strip()
-            if not line:
-                continue
-
-            # Skip header
-            if line.startswith("phase,"):
-                self.header_seen = True
+            if not line or line.startswith("phase,"):
                 continue
 
             self._process_line(line)
 
-            # Exit if both phases done
             if self.warmup_done_event.is_set() and self.steady_done_event.is_set():
                 break
 
     def _process_line(self, line: str):
         """Process a single CSV line"""
         try:
-            parts = line.split(",", 4)  # Only need first few columns
+            parts = line.split(",", 4)
             if len(parts) >= 2:
                 phase = parts[0]
                 status = parts[1]
@@ -289,13 +232,13 @@ class CSVWatcher:
                 print(f"  [CSV] Phase: {phase}, Status: {status}")
 
                 if phase == "WARMUP" and status == "done":
-                    print("  → WARMUP phase complete, starting monitoring")
-                    self.warmup_done_event.set()
-
+                    if not self.warmup_done_event.is_set():
+                        print("  → WARMUP phase complete, starting monitoring")
+                        self.warmup_done_event.set()
                 elif phase == "STEADY" and status == "done":
-                    print("  → STEADY phase complete, stopping monitoring")
-                    self.steady_done_event.set()
-
+                    if not self.steady_done_event.is_set():
+                        print("  → STEADY phase complete, stopping monitoring")
+                        self.steady_done_event.set()
         except Exception as e:
             print(f"  [CSV] Parse error: {e}")
 
@@ -311,7 +254,6 @@ class MonitoringManager:
         self.hardware_perf_available = False
 
     def _check_hardware_perf_events(self) -> bool:
-        """Check if hardware perf events are available (requires bare metal)"""
         try:
             result = subprocess.run(
                 ["perf", "stat", "-e", "cycles", "--", "sleep", "0.1"],
@@ -320,17 +262,13 @@ class MonitoringManager:
                 timeout=5
             )
             available = "<not supported>" not in result.stderr and "<not counted>" not in result.stderr
-            if available:
-                print("Hardware perf events: AVAILABLE (bare metal detected)")
-            else:
-                print("Hardware perf events: NOT AVAILABLE (VM/container detected)")
+            print(f"Hardware perf events: {'AVAILABLE' if available else 'NOT AVAILABLE'}")
             return available
         except Exception as e:
             print(f"Hardware perf check failed: {e}")
             return False
 
     def start_mpstat(self):
-        """Start CPU monitoring with mpstat"""
         output_file = self.work_dir / "mpstat.log"
         self.output_files["mpstat"] = output_file
         fh = open(output_file, "w")
@@ -344,7 +282,6 @@ class MonitoringManager:
         self.processes["mpstat"] = proc
 
     def start_iostat(self):
-        """Start disk I/O monitoring with iostat"""
         output_file = self.work_dir / "iostat.log"
         self.output_files["iostat"] = output_file
         fh = open(output_file, "w")
@@ -358,7 +295,6 @@ class MonitoringManager:
         self.processes["iostat"] = proc
 
     def start_sar_network(self):
-        """Start network monitoring with sar"""
         output_file = self.work_dir / "sar_network.log"
         self.output_files["sar_network"] = output_file
         fh = open(output_file, "w")
@@ -372,7 +308,6 @@ class MonitoringManager:
         self.processes["sar_network"] = proc
 
     def start_perf_stat(self, pid: int):
-        """Start perf stat attached to benchmark process"""
         output_file = self.work_dir / "perf_stat.log"
         self.output_files["perf_stat"] = output_file
         fh = open(output_file, "w")
@@ -381,19 +316,9 @@ class MonitoringManager:
         self.hardware_perf_available = self._check_hardware_perf_events()
 
         if self.hardware_perf_available:
-            events = ",".join([
-                "cycles",
-                "instructions",
-                "cache-references",
-                "cache-misses",
-                "branches",
-                "branch-misses",
-                "context-switches",
-                "cpu-migrations",
-                "page-faults"
-            ])
+            events = "cycles,instructions,cache-references,cache-misses,branch-instructions,branch-misses,context-switches,cpu-migrations,page-faults"
         else:
-            events = "task-clock,context-switches,cpu-migrations,page-faults"
+            events = "context-switches,cpu-migrations,page-faults"
 
         proc = subprocess.Popen(
             ["perf", "stat", "-e", events, "-p", str(pid)],
@@ -404,7 +329,6 @@ class MonitoringManager:
         print(f"Started perf stat on PID {pid}")
 
     def start_all(self, benchmark_pid: int):
-        """Start all monitoring processes"""
         self.start_mpstat()
         self.start_iostat()
         self.start_sar_network()
@@ -412,8 +336,6 @@ class MonitoringManager:
         print("All monitoring processes started")
 
     def stop_all(self):
-        """Stop all monitoring processes"""
-        # Handle perf specially
         if "perf_stat" in self.processes:
             perf_proc = self.processes.pop("perf_stat")
             try:
@@ -426,7 +348,6 @@ class MonitoringManager:
             except Exception as e:
                 print(f"Warning stopping perf: {e}")
 
-        # Stop other processes
         for name, proc in self.processes.items():
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -439,7 +360,6 @@ class MonitoringManager:
             except Exception as e:
                 print(f"Warning stopping {name}: {e}")
 
-        # Close all file handles
         for fh in self._file_handles.values():
             try:
                 fh.close()
@@ -450,7 +370,6 @@ class MonitoringManager:
 
 
 def parse_mpstat(filepath: Path) -> dict:
-    """Parse mpstat output for CPU statistics"""
     result = {
         "user_percent_avg": 0.0,
         "user_percent_max": 0.0,
@@ -465,11 +384,7 @@ def parse_mpstat(filepath: Path) -> dict:
     if not filepath.exists():
         return result
 
-    user_values = []
-    system_values = []
-    idle_values = []
-    iowait_values = []
-    steal_values = []
+    user_values, system_values, idle_values, iowait_values, steal_values = [], [], [], [], []
 
     with open(filepath) as f:
         for line in f:
@@ -503,21 +418,12 @@ def parse_mpstat(filepath: Path) -> dict:
 
 
 def parse_iostat(filepath: Path) -> dict:
-    """Parse iostat output for disk I/O statistics"""
-    result = {
-        "read_bytes": 0,
-        "write_bytes": 0,
-        "read_iops": 0,
-        "write_iops": 0
-    }
+    result = {"read_bytes": 0, "write_bytes": 0, "read_iops": 0, "write_iops": 0}
 
     if not filepath.exists():
         return result
 
-    read_kb_values = []
-    write_kb_values = []
-    read_iops_values = []
-    write_iops_values = []
+    read_kb, write_kb, read_iops, write_iops = [], [], [], []
 
     with open(filepath) as f:
         in_device_section = False
@@ -529,41 +435,32 @@ def parse_iostat(filepath: Path) -> dict:
                 parts = line.split()
                 if len(parts) >= 6 and not parts[0].startswith("loop"):
                     try:
-                        read_iops_values.append(float(parts[1]))
-                        write_iops_values.append(float(parts[2]))
-                        read_kb_values.append(float(parts[3]))
-                        write_kb_values.append(float(parts[4]))
+                        read_iops.append(float(parts[1]))
+                        write_iops.append(float(parts[2]))
+                        read_kb.append(float(parts[3]))
+                        write_kb.append(float(parts[4]))
                     except (ValueError, IndexError):
                         continue
             elif in_device_section and not line.strip():
                 in_device_section = False
 
-    if read_kb_values:
-        result["read_bytes"] = int(sum(read_kb_values) * 1024)
-        result["read_iops"] = int(sum(read_iops_values) / len(read_iops_values))
-    if write_kb_values:
-        result["write_bytes"] = int(sum(write_kb_values) * 1024)
-        result["write_iops"] = int(sum(write_iops_values) / len(write_iops_values))
+    if read_kb:
+        result["read_bytes"] = int(sum(read_kb) * 1024)
+        result["read_iops"] = int(sum(read_iops) / len(read_iops))
+    if write_kb:
+        result["write_bytes"] = int(sum(write_kb) * 1024)
+        result["write_iops"] = int(sum(write_iops) / len(write_iops))
 
     return result
 
 
 def parse_sar_network(filepath: Path) -> dict:
-    """Parse sar network output"""
-    result = {
-        "bytes_sent": 0,
-        "bytes_recv": 0,
-        "packets_sent": 0,
-        "packets_recv": 0
-    }
+    result = {"bytes_sent": 0, "bytes_recv": 0, "packets_sent": 0, "packets_recv": 0}
 
     if not filepath.exists():
         return result
 
-    rx_bytes = []
-    tx_bytes = []
-    rx_packets = []
-    tx_packets = []
+    rx_bytes, tx_bytes, rx_packets, tx_packets = [], [], [], []
 
     with open(filepath) as f:
         for line in f:
@@ -597,50 +494,39 @@ def parse_perf_stat(filepath: Path, hardware_available: bool) -> dict:
         "cache_references": None,
         "cache_misses": None,
         "cache_miss_rate": None,
-        "branches": None,
+        "branch_instructions": None,
         "branch_misses": None,
         "branch_miss_rate": None,
-        "task_clock_ms": 0.0,
         "context_switches": 0,
         "cpu_migrations": 0,
         "page_faults": 0
     }
 
     if not filepath.exists():
-        print(f"Warning: perf stat file not found: {filepath}")
         return result
 
     content = filepath.read_text()
 
-    # Parse task-clock
-    task_clock_match = re.search(r"([\d,.]+)\s+msec\s+task-clock", content)
-    if task_clock_match:
-        result["task_clock_ms"] = float(task_clock_match.group(1).replace(",", ""))
-
-    # Software events
-    software_patterns = {
-        "context_switches": r"([\d,]+)\s+context-switches",
-        "cpu_migrations": r"([\d,]+)\s+cpu-migrations",
-        "page_faults": r"([\d,]+)\s+page-faults"
-    }
-
-    for key, pattern in software_patterns.items():
+    # Software events (always available)
+    for key, pattern in [
+        ("context_switches", r"([\d,]+)\s+context-switches"),
+        ("cpu_migrations", r"([\d,]+)\s+cpu-migrations"),
+        ("page_faults", r"([\d,]+)\s+page-faults")
+    ]:
         match = re.search(pattern, content)
         if match:
             result[key] = int(match.group(1).replace(",", ""))
 
-    # Hardware events
+    # Hardware events (only on bare metal)
     if hardware_available:
-        hardware_patterns = {
-            "cpu_cycles": r"([\d,]+)\s+cycles",
-            "instructions": r"([\d,]+)\s+instructions",
-            "cache_references": r"([\d,]+)\s+cache-references",
-            "cache_misses": r"([\d,]+)\s+cache-misses",
-            "branches": r"([\d,]+)\s+branches",
-            "branch_misses": r"([\d,]+)\s+branch-misses",
-        }
-
-        for key, pattern in hardware_patterns.items():
+        for key, pattern in [
+            ("cpu_cycles", r"([\d,]+)\s+cycles"),
+            ("instructions", r"([\d,]+)\s+instructions"),
+            ("cache_references", r"([\d,]+)\s+cache-references"),
+            ("cache_misses", r"([\d,]+)\s+cache-misses"),
+            ("branch_instructions", r"([\d,]+)\s+branch(?:es|-instructions)"),
+            ("branch_misses", r"([\d,]+)\s+branch-misses"),
+        ]:
             match = re.search(pattern, content)
             if match:
                 result[key] = int(match.group(1).replace(",", ""))
@@ -648,21 +534,19 @@ def parse_perf_stat(filepath: Path, hardware_available: bool) -> dict:
         # Calculate derived metrics
         if result["cpu_cycles"] and result["instructions"]:
             result["ipc"] = round(result["instructions"] / result["cpu_cycles"], 2)
-
         if result["cache_references"] and result["cache_references"] > 0:
             result["cache_miss_rate"] = round(
                 100.0 * (result["cache_misses"] or 0) / result["cache_references"], 2
             )
-
-        if result["branches"] and result["branches"] > 0:
+        if result["branch_instructions"] and result["branch_instructions"] > 0:
             result["branch_miss_rate"] = round(
-                100.0 * (result["branch_misses"] or 0) / result["branches"], 2
+                100.0 * (result["branch_misses"] or 0) / result["branch_instructions"], 2
             )
 
     return result
 
 
-def parse_benchmark_csv(filepath: Path) -> tuple[dict, float]:
+def parse_benchmark_csv(filepath: Path) -> Tuple[dict, float]:
     """Parse benchmark CSV - extract STEADY phase done results and elapsed time"""
     operations = {}
     elapsed_seconds = 0.0
@@ -683,66 +567,59 @@ def parse_benchmark_csv(filepath: Path) -> tuple[dict, float]:
                     "latency_max_us": int(row["latency_max_us"]),
                     "histogram_buckets": json.loads(row["histogram_json"])
                 }
-                # Get elapsed time from the last STEADY done row
                 elapsed_seconds = float(row["time_elapsed"])
 
     return operations, elapsed_seconds
 
+
 class BenchmarkRunner:
     """Main benchmark orchestration class"""
 
-    # Server cores are always fixed
     INFRA_CORES = "0-3"
 
     def __init__(
         self,
         project_dir: Path,
         output_file: Path,
-        duration: int = 60,
-        warmup: int = 10,
+        workload_config: dict,
+        client_config: dict,
         skip_infra: bool = False,
         network_delay_ms: int = 1
     ):
         self.project_dir = project_dir
         self.output_file = output_file
-        self.duration = duration
-        self.warmup = warmup
+        self.workload_config = workload_config
+        self.client_config = client_config
         self.skip_infra = skip_infra
         self.network_delay_ms = network_delay_ms
         self.job_id = generate_job_id()
         self.timestamp = get_timestamp()
         self.variance_control = VarianceControl()
 
-        # Calculate benchmark cores dynamically
         cpu_count = os.cpu_count() or 8
         if cpu_count > 4:
             self.benchmark_cores = f"4-{cpu_count - 1}"
         else:
             self.benchmark_cores = "0-3"
-            print(f"WARNING: Only {cpu_count} cores available, benchmark will share cores with server")
+            print(f"WARNING: Only {cpu_count} cores, benchmark shares cores with server")
 
         print(f"Core allocation: Server={self.INFRA_CORES}, Benchmark={self.benchmark_cores}")
 
     def start_infrastructure(self):
-        """Start Valkey infrastructure on dedicated cores"""
         if self.skip_infra:
-            print("Skipping infrastructure setup (--skip-infra)")
+            print("Skipping infrastructure setup")
             return
 
         print(f"Starting Valkey infrastructure on cores {self.INFRA_CORES}...")
 
-        # Stop any existing processes
         subprocess.run(["make", "cluster-stop"], cwd=self.project_dir, capture_output=True)
         subprocess.run(["pkill", "-f", "valkey-server"], capture_output=True)
         time.sleep(1)
 
-        # Clean work directory
         work_dir = self.project_dir / "work"
         if work_dir.exists():
             shutil.rmtree(work_dir)
 
-        # Start cluster with core pinning
-        print(f"Running: taskset -c {self.INFRA_CORES} make cluster-init")
         result = subprocess.run(
             ["taskset", "-c", self.INFRA_CORES, "make", "cluster-init"],
             cwd=self.project_dir,
@@ -754,51 +631,36 @@ class BenchmarkRunner:
 
         time.sleep(2)
 
-        # Verify
         valkey_cli = self.project_dir / "work/valkey/bin/valkey-cli"
-        result = subprocess.run(
-            [str(valkey_cli), "-p", "7379", "ping"],
-            capture_output=True,
-            text=True
-        )
+        result = subprocess.run([str(valkey_cli), "-p", "7379", "ping"], capture_output=True, text=True)
         if "PONG" not in result.stdout:
-            raise RuntimeError("Valkey infrastructure verification failed")
+            raise RuntimeError("Valkey verification failed")
 
         print("Valkey infrastructure started and verified")
 
     def stop_infrastructure(self):
-        """Stop Valkey infrastructure"""
         if self.skip_infra:
             return
-
         print("Stopping Valkey infrastructure...")
         subprocess.run(["make", "cluster-stop"], cwd=self.project_dir, capture_output=True)
         subprocess.run(["make", "clean"], cwd=self.project_dir, capture_output=True)
         print("Valkey infrastructure stopped")
 
-    def run_benchmark(self, output_csv: Path) -> subprocess.Popen:
-        """Start the benchmark process on dedicated cores"""
+    def run_benchmark(self, output_csv: Path, workload_config_path: Path) -> subprocess.Popen:
         benchmark_script = self.project_dir / ".github/scripts/mock_benchmark.py"
 
         cmd = [
             "taskset", "-c", self.benchmark_cores,
             "python3", str(benchmark_script),
-            "--duration", str(self.duration),
-            "--warmup", str(self.warmup),
+            "--workload-config", str(workload_config_path),
             "--output", str(output_csv)
         ]
         print(f"Starting benchmark on cores {self.benchmark_cores}")
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        return proc
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    def run(self):
+    def run(self, workload_config_path: Path):
         """Execute the full benchmark workflow"""
-        # Setup variance control
         self.variance_control.setup(network_delay_ms=self.network_delay_ms)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -808,23 +670,21 @@ class BenchmarkRunner:
             try:
                 self.start_infrastructure()
 
-                print(f"Starting benchmark (warmup: {self.warmup}s, duration: {self.duration}s)...")
-                benchmark_proc = self.run_benchmark(benchmark_csv)
+                print("Starting benchmark...")
+                benchmark_proc = self.run_benchmark(benchmark_csv, workload_config_path)
 
                 csv_watcher = CSVWatcher(benchmark_csv)
                 csv_watcher.start()
 
                 print("Waiting for WARMUP phase to complete...")
-                if not csv_watcher.wait_for_warmup_done(timeout=self.warmup + 60):
-                    raise RuntimeError("Timeout waiting for warmup")
+                csv_watcher.wait_for_warmup_done()
 
                 print("Starting monitoring for STEADY phase...")
                 monitor = MonitoringManager(work_dir)
                 monitor.start_all(benchmark_proc.pid)
 
                 print("Waiting for STEADY phase to complete...")
-                if not csv_watcher.wait_for_steady_done(timeout=self.duration + 60):
-                    raise RuntimeError("Timeout waiting for steady phase")
+                csv_watcher.wait_for_steady_done()
 
                 monitor.stop_all()
                 csv_watcher.stop()
@@ -832,7 +692,7 @@ class BenchmarkRunner:
                 stdout, stderr = benchmark_proc.communicate(timeout=10)
                 print(f"Benchmark stderr:\n{stderr.decode()}")
 
-                # Parse results - get elapsed from CSV
+                # Parse results
                 operations, elapsed_seconds = parse_benchmark_csv(benchmark_csv)
                 perf_counters = parse_perf_stat(
                     monitor.output_files.get("perf_stat", Path()),
@@ -842,35 +702,18 @@ class BenchmarkRunner:
                 disk_stats = parse_iostat(monitor.output_files.get("iostat", Path()))
                 network_stats = parse_sar_network(monitor.output_files.get("sar_network", Path()))
 
+                # Copy CSV to output directory
                 output_csv_path = self.output_file.with_suffix('.csv')
                 if benchmark_csv.exists():
                     shutil.copy(benchmark_csv, output_csv_path)
                     print(f"Benchmark CSV saved to {output_csv_path}")
 
-                # Build result - original structure
+                # Build result
                 result = {
                     "job_id": self.job_id,
                     "timestamp": self.timestamp,
-                    "environment": {
-                        "hardware_perf_available": monitor.hardware_perf_available,
-                        "cpu_count": os.cpu_count()
-                    },
-                    "benchmark_config": {
-                        "warmup": {
-                            "duration_seconds": self.warmup
-                        },
-                        "measurement": {
-                            "duration_seconds": self.duration,
-                            "target_rps": 10000
-                        }
-                    },
-                    "client_config": {
-                        "client_name": "valkey-glide",
-                        "driver": "valkey-glide",
-                        "version": "1.0.0",
-                        "connection_pool_size": 24,
-                        "read_from": "primary"
-                    },
+                    "benchmark_config": self.workload_config,
+                    "client_config": self.client_config,
                     "elapsed_seconds": int(elapsed_seconds),
                     "operations": operations,
                     "perf": {
@@ -895,56 +738,36 @@ class BenchmarkRunner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark runner with variance control")
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="benchmark_results.json",
-        help="Output JSON file path"
-    )
-    parser.add_argument(
-        "--duration",
-        type=int,
-        default=60,
-        help="Steady state duration in seconds"
-    )
-    parser.add_argument(
-        "--warmup",
-        type=int,
-        default=10,
-        help="Warmup duration in seconds"
-    )
-    parser.add_argument(
-        "--project-dir",
-        type=str,
-        default=None,
-        help="Project directory (defaults to current directory)"
-    )
-    parser.add_argument(
-        "--skip-infra",
-        action="store_true",
-        help="Skip Valkey infrastructure setup (for testing)"
-    )
-    parser.add_argument(
-        "--network-delay",
-        type=int,
-        default=1,
-        help="Artificial network delay in ms (default: 1)"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark runner")
+    parser.add_argument("--output", type=str, default="benchmark_results.json")
+    parser.add_argument("--workload-config", type=str, required=True, help="Path to workload JSON config")
+    parser.add_argument("--client-config", type=str, required=True, help="Path to client JSON config")
+    parser.add_argument("--project-dir", type=str, default=None)
+    parser.add_argument("--skip-infra", action="store_true")
+    parser.add_argument("--network-delay", type=int, default=1)
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir) if args.project_dir else Path.cwd()
     output_file = Path(args.output)
+    workload_config_path = Path(args.workload_config)
+    client_config_path = Path(args.client_config)
+
+    # Load configurations
+    workload_config = load_json_config(workload_config_path)
+    client_config = load_json_config(client_config_path)
+
+    print(f"Loaded workload config: {workload_config['benchmark-profile']['name']}")
+    print(f"Loaded client config: {client_config['client_name']}")
 
     runner = BenchmarkRunner(
-        project_dir,
-        output_file,
-        args.duration,
-        args.warmup,
-        args.skip_infra,
-        args.network_delay
+        project_dir=project_dir,
+        output_file=output_file,
+        workload_config=workload_config,
+        client_config=client_config,
+        skip_infra=args.skip_infra,
+        network_delay_ms=args.network_delay
     )
-    runner.run()
+    runner.run(workload_config_path)
 
 
 if __name__ == "__main__":

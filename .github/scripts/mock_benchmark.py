@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Mock benchmark application that generates fake benchmark results.
-Reads benchmark workload config and outputs results aligned with it.
+Reads workload configuration and generates aligned results.
+Phase completion is determined by workload config (duration or requests).
 """
 
 import argparse
@@ -64,97 +65,110 @@ def write_row(writer, file_handle, phase: str, status: str, start_time: float, c
     file_handle.flush()
 
 
+def load_workload_config(filepath: Path) -> dict:
+    with open(filepath) as f:
+        return json.load(f)
+
+
 def get_phase_config(workload_config: dict, phase_id: str) -> dict:
-    """Get phase configuration by ID"""
     for phase in workload_config.get("phases", []):
-        if phase.get("id") == phase_id:
+        if phase["id"] == phase_id:
             return phase
     return {}
 
 
-def calculate_request_counts(phase_config: dict, duration_seconds: int) -> dict:
-    """Calculate request counts based on phase config"""
+def get_phase_duration(phase_config: dict, default_duration: int = 60) -> int:
+    """Get phase duration from completion config"""
     completion = phase_config.get("completion", {})
-    operations = phase_config.get("operations", [])
-    
-    # Determine total requests
-    if completion.get("type") == "requests":
-        total_requests = completion.get("request_limit", 1000000)
+    if completion.get("type") == "duration":
+        return completion.get("duration_seconds", default_duration)
     else:
-        # Duration-based: estimate based on target_rps
+        # For request-based completion, simulate with a duration
+        # In real benchmark, this would be driven by actual request count
+        total_requests = completion.get("total_requests", 1000000)
         target_rps = phase_config.get("target_rps", 10000)
-        if target_rps == -1:
-            target_rps = 10000  # Default for warmup
-        total_requests = target_rps * duration_seconds
+        if target_rps > 0:
+            return max(1, total_requests // target_rps)
+        return default_duration
 
-    # Calculate per-operation counts based on weights
-    counts = {}
-    total_weight = sum(op.get("weight", 1) for op in operations)
-    
+
+def get_phase_requests(phase_config: dict) -> int:
+    """Get total requests for a phase"""
+    completion = phase_config.get("completion", {})
+    if completion.get("type") == "requests":
+        return completion.get("total_requests", 1000000)
+    else:
+        # For duration-based, estimate based on target RPS
+        duration = completion.get("duration_seconds", 60)
+        target_rps = phase_config.get("target_rps", -1)
+        if target_rps > 0:
+            return duration * target_rps
+        else:
+            # Unlimited RPS, use keyspace size as estimate
+            return phase_config.get("keyspace", {}).get("keys_count", 100000)
+
+
+def generate_phase_results(phase_config: dict, total_requests: int) -> list:
+    operations = phase_config.get("operations", [])
+    results = []
+
+    latency_profiles = {
+        "SET": [
+            (100, 0.02), (200, 0.35), (300, 0.40), (500, 0.15),
+            (1000, 0.05), (2000, 0.02), (5000, 0.01)
+        ],
+        "GET": [
+            (100, 0.03), (200, 0.45), (300, 0.35), (500, 0.10),
+            (1000, 0.04), (2000, 0.02), (5000, 0.01)
+        ]
+    }
+
+    total_weight = sum(op.get("weight", 1.0) for op in operations)
+
     for op in operations:
-        cmd_name = op.get("command", "UNKNOWN").upper()
-        weight = op.get("weight", 1)
-        counts[cmd_name] = int(total_requests * (weight / total_weight))
-    
-    return counts
+        command = op.get("command", "").upper()
+        weight = op.get("weight", 1.0)
+        op_requests = int(total_requests * (weight / total_weight))
 
+        failed = max(0, int(op_requests * 0.00001))
+        successful = op_requests - failed
 
-# Latency profiles for different commands
-LATENCY_PROFILES = {
-    "SET": [
-        (100, 0.02),
-        (200, 0.35),
-        (300, 0.40),
-        (500, 0.15),
-        (1000, 0.05),
-        (2000, 0.02),
-        (5000, 0.01)
-    ],
-    "GET": [
-        (100, 0.03),
-        (200, 0.45),
-        (300, 0.35),
-        (500, 0.10),
-        (1000, 0.04),
-        (2000, 0.02),
-        (5000, 0.01)
-    ],
-    "DEFAULT": [
-        (100, 0.05),
-        (200, 0.40),
-        (300, 0.35),
-        (500, 0.12),
-        (1000, 0.05),
-        (2000, 0.02),
-        (5000, 0.01)
-    ]
-}
+        profile = latency_profiles.get(command, latency_profiles["GET"])
+
+        results.append({
+            "name": command,
+            "num_requests": op_requests,
+            "successful_requests": successful,
+            "failed_requests": failed,
+            "latency_min_us": 85 if command == "SET" else 92,
+            "latency_max_us": 4400 if command == "SET" else 5100,
+            "histogram": generate_histogram(profile, op_requests)
+        })
+
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Mock benchmark application")
-    parser.add_argument("--duration", type=int, default=60, help="Steady state duration in seconds")
-    parser.add_argument("--warmup", type=int, default=10, help="Warmup duration in seconds")
+    parser.add_argument("--workload-config", type=str, required=True, help="Path to workload JSON config")
     parser.add_argument("--output", type=str, required=True, help="Output CSV file path")
-    parser.add_argument("--workload-config", type=str, required=True, help="Benchmark workload config JSON file")
     args = parser.parse_args()
 
-    # Load workload config
-    workload_config_path = Path(args.workload_config)
-    if not workload_config_path.exists():
-        print(f"ERROR: Workload config not found: {workload_config_path}", file=sys.stderr)
-        sys.exit(1)
+    workload_config = load_workload_config(Path(args.workload_config))
+    profile_name = workload_config.get("benchmark-profile", {}).get("name", "Unknown")
 
-    with open(workload_config_path) as f:
-        workload_config = json.load(f)
+    warmup_config = get_phase_config(workload_config, "WARMUP")
+    steady_config = get_phase_config(workload_config, "STEADY")
+
+    warmup_duration = get_phase_duration(warmup_config, default_duration=10)
+    steady_duration = get_phase_duration(steady_config, default_duration=60)
 
     print(f"Mock benchmark starting", file=sys.stderr)
-    print(f"  Workload config: {args.workload_config}", file=sys.stderr)
-    print(f"  Warmup duration: {args.warmup}s", file=sys.stderr)
-    print(f"  Steady state duration: {args.duration}s", file=sys.stderr)
+    print(f"  Workload: {profile_name}", file=sys.stderr)
+    print(f"  WARMUP: {warmup_config.get('completion', {})}", file=sys.stderr)
+    print(f"  STEADY: {steady_config.get('completion', {})}", file=sys.stderr)
     print(f"  Output: {args.output}", file=sys.stderr)
 
-    # CSV columns
     fieldnames = [
         "phase", "status", "timestamp", "time_elapsed",
         "command_name", "num_requests", "successful_requests", "failed_requests",
@@ -169,104 +183,65 @@ def main():
         f.flush()
 
         # ========== WARMUP PHASE ==========
-        warmup_config = get_phase_config(workload_config, "WARMUP")
-        warmup_operations = warmup_config.get("operations", [])
-        warmup_request_counts = calculate_request_counts(warmup_config, args.warmup)
+        print(f"Starting WARMUP phase ({warmup_duration}s)...", file=sys.stderr)
 
-        print(f"Starting WARMUP phase...", file=sys.stderr)
-        print(f"  Operations: {list(warmup_request_counts.keys())}", file=sys.stderr)
-
-        # Write warmup running status
-        warmup_commands = []
-        for op in warmup_operations:
-            cmd_name = op.get("command", "UNKNOWN").upper()
-            warmup_commands.append({
-                "name": cmd_name,
+        warmup_ops = warmup_config.get("operations", [{"command": "SET", "weight": 1.0}])
+        warmup_running = [
+            {
+                "name": op.get("command", "").upper(),
                 "num_requests": 0,
                 "successful_requests": 0,
                 "failed_requests": 0,
                 "latency_min_us": 0,
                 "latency_max_us": 0,
                 "histogram": []
-            })
-        write_row(writer, f, "WARMUP", "running", start_time, warmup_commands)
+            }
+            for op in warmup_ops
+        ]
+        write_row(writer, f, "WARMUP", "running", start_time, warmup_running)
 
-        # Do warmup work
-        warmup_end = time.time() + args.warmup
+        warmup_end = time.time() + warmup_duration
         warmup_iterations = 0
         while time.time() < warmup_end:
             cpu_work(500)
             warmup_iterations += 1
 
-        # Write warmup done status with results
-        warmup_commands = []
-        for op in warmup_operations:
-            cmd_name = op.get("command", "UNKNOWN").upper()
-            num_requests = warmup_request_counts.get(cmd_name, 10000)
-            latency_profile = LATENCY_PROFILES.get(cmd_name, LATENCY_PROFILES["DEFAULT"])
-            warmup_commands.append({
-                "name": cmd_name,
-                "num_requests": num_requests,
-                "successful_requests": num_requests,
-                "failed_requests": 0,
-                "latency_min_us": 95,
-                "latency_max_us": 4200,
-                "histogram": generate_histogram(latency_profile, num_requests)
-            })
-        write_row(writer, f, "WARMUP", "done", start_time, warmup_commands)
+        warmup_total_requests = get_phase_requests(warmup_config)
+        warmup_results = generate_phase_results(warmup_config, warmup_total_requests)
+
+        write_row(writer, f, "WARMUP", "done", start_time, warmup_results)
         print(f"WARMUP phase complete ({warmup_iterations} iterations)", file=sys.stderr)
 
         time.sleep(0.5)
 
         # ========== STEADY STATE PHASE ==========
-        steady_config = get_phase_config(workload_config, "STEADY")
-        steady_operations = steady_config.get("operations", [])
-        steady_request_counts = calculate_request_counts(steady_config, args.duration)
+        print(f"Starting STEADY phase ({steady_duration}s)...", file=sys.stderr)
 
-        print(f"Starting STEADY phase...", file=sys.stderr)
-        print(f"  Operations: {list(steady_request_counts.keys())}", file=sys.stderr)
-        print(f"  Request counts: {steady_request_counts}", file=sys.stderr)
-
-        # Write steady running status
-        steady_commands = []
-        for op in steady_operations:
-            cmd_name = op.get("command", "UNKNOWN").upper()
-            steady_commands.append({
-                "name": cmd_name,
+        steady_ops = steady_config.get("operations", [])
+        steady_running = [
+            {
+                "name": op.get("command", "").upper(),
                 "num_requests": 0,
                 "successful_requests": 0,
                 "failed_requests": 0,
                 "latency_min_us": 0,
                 "latency_max_us": 0,
                 "histogram": []
-            })
-        write_row(writer, f, "STEADY", "running", start_time, steady_commands)
+            }
+            for op in steady_ops
+        ]
+        write_row(writer, f, "STEADY", "running", start_time, steady_running)
 
-        # Do steady state work
-        steady_end = time.time() + args.duration
+        steady_end = time.time() + steady_duration
         steady_iterations = 0
         while time.time() < steady_end:
             cpu_work(1000)
             steady_iterations += 1
 
-        # Write steady done status with results
-        steady_commands = []
-        for op in steady_operations:
-            cmd_name = op.get("command", "UNKNOWN").upper()
-            num_requests = steady_request_counts.get(cmd_name, 100000)
-            latency_profile = LATENCY_PROFILES.get(cmd_name, LATENCY_PROFILES["DEFAULT"])
-            # Simulate small number of failures
-            failed = max(1, num_requests // 100000)
-            steady_commands.append({
-                "name": cmd_name,
-                "num_requests": num_requests,
-                "successful_requests": num_requests - failed,
-                "failed_requests": failed,
-                "latency_min_us": 85,
-                "latency_max_us": 5100,
-                "histogram": generate_histogram(latency_profile, num_requests)
-            })
-        write_row(writer, f, "STEADY", "done", start_time, steady_commands)
+        steady_total_requests = get_phase_requests(steady_config)
+        steady_results = generate_phase_results(steady_config, steady_total_requests)
+
+        write_row(writer, f, "STEADY", "done", start_time, steady_results)
         print(f"STEADY phase complete ({steady_iterations} iterations)", file=sys.stderr)
 
     total_time = round(time.time() - start_time, 2)
