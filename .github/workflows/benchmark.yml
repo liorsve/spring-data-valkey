@@ -23,8 +23,8 @@ env:
   ALL_CLIENTS: 'valkey_glide'
   ALL_WORKLOADS: 'standard_workload'
   # Defaults for push events
-  DEFAULT_CLIENTS: 'valkey_glide'
-  DEFAULT_WORKLOADS: 'standard_workload'
+  DEFAULT_CLIENTS: 'sample-valkey-glide-cme'
+  DEFAULT_WORKLOADS: 'sample-benchmark'
 
 jobs:
   setup:
@@ -180,7 +180,7 @@ jobs:
           python3 .github/scripts/benchmark_runner.py \
             --output "benchmark_results_${{ matrix.client }}_${{ matrix.workload }}.json" \
             --workload-config ".github/workflows/configs/workloads/${{ matrix.workload }}.json" \
-            --client-config ".github/workflows/configs/clients/${{ matrix.client }}.json" \
+            --driver-config ".github/workflows/configs/clients/${{ matrix.client }}.json" \
             --project-dir ${{ github.workspace }}
 
       - name: Display results summary
@@ -195,14 +195,26 @@ jobs:
               data = json.load(f)
           
           print(f\"Job ID: {data['job_id']}\")
-          print(f\"Client: {data['config']['client']['client_name']}\")
-          print(f\"Workload: {data['config']['workload']['benchmark-profile']['name']}\")
-          print(f\"Elapsed: {data['results']['elapsed_seconds']}s\")
+          print(f\"Driver: {data['config']['driver']['driver_id']}\")
+          print(f\"Workload: {data['config']['workload']['benchmark_profile']['name']}\")
+          print(f\"Elapsed: {data['results']['elapsed_ms']}ms\")
           print()
-          print('Operations:')
-          for op, stats in data['results']['operations'].items():
-              success_rate = (stats['successful_requests'] / stats['total_requests'] * 100) if stats['total_requests'] > 0 else 0
-              print(f\"  {op}: {stats['total_requests']:,} requests ({success_rate:.2f}% success)\")
+          
+          steady = data['results']['phases'].get('STEADY', {})
+          if steady:
+              totals = steady.get('totals', {})
+              print(f\"STEADY totals: {totals.get('requests', 0):,} requests, {totals.get('errors', 0)} errors\")
+              print()
+              print('Per-command metrics:')
+              for cmd, m in steady.get('metrics', {}).items():
+                  reqs = m['requests']
+                  errs = m['errors']
+                  lat = m.get('latency', {})
+                  summary = lat.get('summary', {})
+                  print(f\"  {cmd}:\")
+                  print(f\"    Requests: {reqs:,} (errors: {errs})\")
+                  print(f\"    Latency: min={summary.get('min')} p50={summary.get('p50')} p95={summary.get('p95')} p99={summary.get('p99')} p999={summary.get('p999')} max={summary.get('max')} us\")
+          
           print()
           print('Perf:')
           perf = data['results']['perf']['counters']
@@ -239,19 +251,24 @@ jobs:
         run: |
           echo "# Benchmark Results Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Client | Workload | Status | Elapsed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Driver | Workload | Status | Elapsed |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
           
-          for f in results/*.json 2>/dev/null; do
-            if [ -f "$f" ]; then
-              python3 -c "
+          found=false
+          for f in results/*.json; do
+            [ -f "$f" ] || continue
+            found=true
+            python3 << EOF >> $GITHUB_STEP_SUMMARY
           import json
-          with open('$f') as file:
+          with open("$f") as file:
               data = json.load(file)
-          client = data['config']['client']['client_name']
-          workload = data['config']['workload']['benchmark-profile']['name']
-          elapsed = data['results']['elapsed_seconds']
-          print(f'| {client} | {workload} | ✅ | {elapsed}s |')
-          " >> $GITHUB_STEP_SUMMARY
-            fi
-          done || echo "| - | - | ❌ No results | - |" >> $GITHUB_STEP_SUMMARY
+          driver = data["config"]["driver"]["driver_id"]
+          workload = data["config"]["workload"]["benchmark_profile"]["name"]
+          elapsed = data["results"]["elapsed_ms"]
+          print(f"| {driver} | {workload} | ✅ | {elapsed}ms |")
+          EOF
+          done
+          
+          if [ "$found" = false ]; then
+            echo "| - | - | ❌ No results | - |" >> $GITHUB_STEP_SUMMARY
+          fi
