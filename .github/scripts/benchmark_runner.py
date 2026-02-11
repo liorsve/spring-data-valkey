@@ -28,10 +28,13 @@ from pathlib import Path
 from typing import Optional
 
 
-def generate_job_id():
+def generate_job_id(prefix: str = ""):
     now = datetime.now(timezone.utc)
     random_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    return f"bench-{now.strftime('%Y%m%d-%H%M%S')}-{random_suffix}"
+    base = f"bench-{now.strftime('%Y%m%d-%H%M%S')}-{random_suffix}"
+    if prefix:
+        return f"{prefix}-{base}"
+    return base
 
 
 def get_timestamp():
@@ -791,6 +794,7 @@ class BenchmarkRunner:
     def __init__(self, project_dir: Path, output_file: Path,
                  workload_config: dict, driver_config: dict,
                  versions: dict,
+                 job_id_prefix: str = "",
                  skip_infra: bool = False, network_delay_ms: int = 1,
                  publish_to_db: bool = True, pg_host: str = None,
                  pg_port: int = None, pg_database: str = None,
@@ -803,7 +807,7 @@ class BenchmarkRunner:
         self.skip_infra = skip_infra
         self.network_delay_ms = network_delay_ms
         self.publish_to_db = publish_to_db
-        self.job_id = generate_job_id()
+        self.job_id = generate_job_id(prefix=job_id_prefix)
         self.timestamp = get_timestamp()
         self.variance_control = VarianceControl()
 
@@ -1048,11 +1052,11 @@ def main():
     parser.add_argument("--network-delay", type=int, default=1)
 
     parser.add_argument("--versions-json", type=str, required=True,
-                        help="JSON string with version info: "
-                             '{"primary_driver_id": "...", '
-                             '"primary_driver_version": "...", '
-                             '"secondary_driver_id": "...", '
-                             '"secondary_driver_version": "..."}')
+                        help="JSON string with version info")
+
+    parser.add_argument("--job-id-prefix", type=str, default="",
+                        help="Optional prefix for the job ID "
+                             "(e.g., 'regression', 'nightly', 'pr-123')")
 
     parser.add_argument("--no-publish", action="store_true",
                         help="Skip publishing to PostgreSQL")
@@ -1063,6 +1067,7 @@ def main():
     parser.add_argument("--pg-region", type=str, default=None)
 
     args = parser.parse_args()
+
 
     project_dir = (Path(args.project_dir)
                    if args.project_dir else Path.cwd())
@@ -1092,6 +1097,7 @@ def main():
         workload_config=workload_config,
         driver_config=driver_config,
         versions=versions,
+        job_id_prefix=args.job_id_prefix,
         skip_infra=args.skip_infra,
         network_delay_ms=args.network_delay,
         publish_to_db=not args.no_publish,
