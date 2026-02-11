@@ -13,6 +13,16 @@ on:
         required: true
         type: string
         default: 'standard_workload'
+      primary_version:
+        description: 'Primary driver version or commit ID. Must be EMPTY for spring-data-valkey (auto-resolved to branch HEAD).'
+        required: false
+        type: string
+        default: ''
+      secondary_version:
+        description: 'Secondary driver version or commit ID. Must be EMPTY if driver config has no secondary driver.'
+        required: false
+        type: string
+        default: ''
 
   push:
     branches:
@@ -23,8 +33,12 @@ env:
   ALL_CLIENTS: 'valkey_glide'
   ALL_WORKLOADS: 'standard_workload'
   # Defaults for push events
-  DEFAULT_CLIENTS: 'sample-valkey-glide-cme'
+  DEFAULT_CLIENTS: 'sample-spring-data-valkey-glide-cmd-tls'
   DEFAULT_WORKLOADS: 'sample-benchmark'
+  # For spring-data-valkey the primary version MUST be empty (auto-resolved to HEAD SHA).
+  # Secondary default is set for testing since that config has valkey-glide as secondary.
+  DEFAULT_PRIMARY_VERSION: ''
+  DEFAULT_SECONDARY_VERSION: '1.0.0-rc1'
 
 jobs:
   setup:
@@ -57,18 +71,81 @@ jobs:
           fi
           
           # Convert comma-separated to JSON array
-          # e.g., "valkey_glide,lettuce" -> ["valkey_glide","lettuce"]
           CLIENTS_JSON=$(echo "$SELECTED_CLIENTS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -sc .)
           WORKLOADS_JSON=$(echo "$SELECTED_WORKLOADS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -sc .)
-          
+
           # Build matrix JSON
           MATRIX=$(jq -c -n \
             --argjson clients "$CLIENTS_JSON" \
             --argjson workloads "$WORKLOADS_JSON" \
             '{client: $clients, workload: $workloads}')
-          
+
           echo "Generated matrix: $MATRIX"
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+      - name: Early version validation
+        run: |
+          # Determine effective versions based on event type
+          if [ "${{ github.event_name }}" = "push" ]; then
+            INPUT_PRIMARY="${{ env.DEFAULT_PRIMARY_VERSION }}"
+            INPUT_SECONDARY="${{ env.DEFAULT_SECONDARY_VERSION }}"
+          else
+            INPUT_PRIMARY="${{ github.event.inputs.primary_version }}"
+            INPUT_SECONDARY="${{ github.event.inputs.secondary_version }}"
+          fi
+
+          INPUT_CLIENTS="${{ github.event.inputs.clients }}"
+          SELECTED_CLIENTS="${INPUT_CLIENTS:-${{ env.DEFAULT_CLIENTS }}}"
+          if [ "$SELECTED_CLIENTS" == "all" ]; then
+            SELECTED_CLIENTS="${{ env.ALL_CLIENTS }}"
+          fi
+
+          echo "Validating versions against all selected client configs..."
+          echo "  primary_version input:   '${INPUT_PRIMARY}'"
+          echo "  secondary_version input: '${INPUT_SECONDARY}'"
+
+          ERRORS=0
+          IFS=',' read -ra CLIENT_ARRAY <<< "$SELECTED_CLIENTS"
+          for CLIENT in "${CLIENT_ARRAY[@]}"; do
+            CLIENT=$(echo "$CLIENT" | xargs)  # trim whitespace
+            CONFIG_PATH=".github/workflows/configs/clients/${CLIENT}.json"
+
+            if [ ! -f "$CONFIG_PATH" ]; then
+              echo "ERROR: Client config not found: $CONFIG_PATH"
+              ERRORS=$((ERRORS + 1))
+              continue
+            fi
+
+            DRIVER_ID=$(jq -r '.driver_id' "$CONFIG_PATH")
+            SECONDARY_DRIVER_ID=$(jq -r '.specific_driver_config.secondary_driver_id // empty' "$CONFIG_PATH")
+
+            echo ""
+            echo "  Client: $CLIENT"
+            echo "    driver_id:           $DRIVER_ID"
+            echo "    secondary_driver_id: ${SECONDARY_DRIVER_ID:-<none>}"
+
+            # Rule 1: spring-data-valkey must NOT have explicit primary version
+            if [ "$DRIVER_ID" = "spring-data-valkey" ] && [ -n "$INPUT_PRIMARY" ]; then
+              echo "    ERROR: primary_version must NOT be provided when driver_id is 'spring-data-valkey'."
+              echo "           The branch HEAD commit SHA is used automatically."
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Rule 2: no secondary driver but secondary version provided
+            if [ -z "$SECONDARY_DRIVER_ID" ] && [ -n "$INPUT_SECONDARY" ]; then
+              echo "    ERROR: secondary_version was provided but client '$CLIENT' has no secondary driver."
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          echo ""
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "========================================="
+            echo "VALIDATION FAILED: $ERRORS error(s) found"
+            echo "========================================="
+            exit 1
+          fi
+          echo "✓ All version validations passed"
 
   benchmark:
     needs: setup
@@ -89,16 +166,66 @@ jobs:
           echo "Client: ${{ matrix.client }}"
           echo "Workload: ${{ matrix.workload }}"
           echo "========================================"
-          
+
           echo "Workload config:"
           cat ".github/workflows/configs/workloads/${{ matrix.workload }}.json" | jq '.phases[] | {id, completion}'
+
+      - name: Resolve versions
+        id: versions
+        run: |
+          DRIVER_CONFIG=".github/workflows/configs/clients/${{ matrix.client }}.json"
+          DRIVER_ID=$(jq -r '.driver_id' "$DRIVER_CONFIG")
+          SECONDARY_DRIVER_ID=$(jq -r '.specific_driver_config.secondary_driver_id // empty' "$DRIVER_CONFIG")
+
+          # Determine raw inputs based on event type
+          if [ "${{ github.event_name }}" = "push" ]; then
+            PRIMARY_VERSION="${{ env.DEFAULT_PRIMARY_VERSION }}"
+            SECONDARY_VERSION="${{ env.DEFAULT_SECONDARY_VERSION }}"
+          else
+            PRIMARY_VERSION="${{ github.event.inputs.primary_version }}"
+            SECONDARY_VERSION="${{ github.event.inputs.secondary_version }}"
+          fi
+
+          echo "Driver ID:           $DRIVER_ID"
+          echo "Secondary Driver ID: ${SECONDARY_DRIVER_ID:-<none>}"
+          echo "Raw primary input:   '${PRIMARY_VERSION}'"
+          echo "Raw secondary input: '${SECONDARY_VERSION}'"
+
+          # Resolve spring-data-valkey: use branch HEAD commit SHA
+          if [ "$DRIVER_ID" = "spring-data-valkey" ]; then
+            PRIMARY_VERSION="${{ github.sha }}"
+            echo "Resolved spring-data-valkey primary_version to branch HEAD: $PRIMARY_VERSION"
+          fi
+
+          # If no secondary driver exists, force secondary version to empty
+          if [ -z "$SECONDARY_DRIVER_ID" ]; then
+            SECONDARY_VERSION=""
+          fi
+
+          # Build versions JSON
+          VERSIONS_JSON=$(jq -c -n \
+            --arg pid "$DRIVER_ID" \
+            --arg pv "$PRIMARY_VERSION" \
+            --arg sid "$SECONDARY_DRIVER_ID" \
+            --arg sv "$SECONDARY_VERSION" \
+            '{
+              primary_driver_id: $pid,
+              primary_driver_version: (if $pv == "" then null else $pv end),
+              secondary_driver_id: (if $sid == "" then null else $sid end),
+              secondary_driver_version: (if $sv == "" then null else $sv end)
+            }')
+
+          echo ""
+          echo "Resolved versions JSON:"
+          echo "$VERSIONS_JSON" | jq .
+          echo "versions_json=$VERSIONS_JSON" >> $GITHUB_OUTPUT
 
       - name: Verify metal instance
         run: |
           echo "=== System Info ==="
           lscpu | grep "Model name"
           echo "CPU cores: $(nproc)"
-          
+
           VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
           echo "Virtualization: $VIRT"
           if [ "$VIRT" != "none" ]; then
@@ -109,7 +236,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y sysstat iproute2 python3-pip
-          
+
           # Install Python dependencies system-wide
           sudo python3 -m pip install psycopg2-binary boto3
 
@@ -119,25 +246,25 @@ jobs:
             sudo mv /tmp/FlameGraph /opt/FlameGraph
           fi
           ls /opt/FlameGraph/stackcollapse-perf.pl && echo "✓ FlameGraph tools installed"
-          
+
           CODENAME=$(lsb_release -cs)
           KERNEL=$(uname -r)
           echo "Ubuntu: $CODENAME, Kernel: $KERNEL"
-          
+
           if sudo apt-get install -y linux-tools-$(uname -r) 2>/dev/null; then
             echo "✓ Installed kernel-matched perf tools"
           else
             echo "Kernel-matched tools not available, trying HWE fallback..."
-            
+
             cd /tmp
-            
+
             KERNEL_MAJOR=$(echo $KERNEL | cut -d'.' -f1,2)
             echo "Looking for HWE tools for kernel $KERNEL_MAJOR..."
-            
+
             HWE_PKG=$(apt-cache search "linux-hwe.*tools.*${KERNEL_MAJOR}" 2>/dev/null | \
                       grep -oP "linux-hwe-[\d.]+-tools-[\d.]+-\d+" | \
                       sort -V | tail -1)
-            
+
             if [ -n "$HWE_PKG" ]; then
               echo "Found HWE package: $HWE_PKG"
               apt-get download "$HWE_PKG"
@@ -145,7 +272,7 @@ jobs:
               echo "No matching HWE package found, trying generic..."
               sudo apt-get install -y linux-tools-generic 2>/dev/null || true
             fi
-            
+
             for deb in linux-hwe*tools*.deb; do
               if [ -f "$deb" ]; then
                 echo "Extracting $deb..."
@@ -160,14 +287,14 @@ jobs:
                 break
               fi
             done
-            
+
             cd -
           fi
-          
+
           # Set perf permissions before verification
           sudo sysctl -w kernel.perf_event_paranoid=-1
           sudo sysctl -w kernel.kptr_restrict=0
-          
+
           echo ""
           echo "=== Perf Verification ==="
           which perf
@@ -181,7 +308,8 @@ jobs:
             --output "benchmark_results_${{ matrix.client }}_${{ matrix.workload }}.json" \
             --workload-config ".github/workflows/configs/workloads/${{ matrix.workload }}.json" \
             --driver-config ".github/workflows/configs/clients/${{ matrix.client }}.json" \
-            --project-dir ${{ github.workspace }}
+            --project-dir ${{ github.workspace }} \
+            --versions-json '${{ steps.versions.outputs.versions_json }}'
 
       - name: Display results summary
         if: always()
@@ -193,13 +321,18 @@ jobs:
           import json
           with open('$RESULT_FILE') as f:
               data = json.load(f)
-          
+
           print(f\"Job ID: {data['job_id']}\")
           print(f\"Driver: {data['config']['driver']['driver_id']}\")
           print(f\"Workload: {data['config']['workload']['benchmark_profile']['name']}\")
           print(f\"Elapsed: {data['results']['elapsed_ms']}ms\")
           print()
-          
+
+          versions = data.get('versions', {})
+          print(f\"Primary:   {versions.get('primary_driver_id')} @ {versions.get('primary_driver_version', 'N/A')}\")
+          print(f\"Secondary: {versions.get('secondary_driver_id', 'N/A')} @ {versions.get('secondary_driver_version', 'N/A')}\")
+          print()
+
           steady = data['results']['phases'].get('STEADY', {})
           if steady:
               totals = steady.get('totals', {})
@@ -214,7 +347,7 @@ jobs:
                   print(f\"  {cmd}:\")
                   print(f\"    Requests: {reqs:,} (errors: {errs})\")
                   print(f\"    Latency: min={summary.get('min')} p50={summary.get('p50')} p95={summary.get('p95')} p99={summary.get('p99')} p999={summary.get('p999')} max={summary.get('max')} us\")
-          
+
           print()
           print('Perf:')
           perf = data['results']['perf']['counters']
@@ -251,9 +384,9 @@ jobs:
         run: |
           echo "# Benchmark Results Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Driver | Workload | Status | Elapsed |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
-          
+          echo "| Driver | Version | Workload | Status | Elapsed |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|---------|----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+
           found=false
           for f in results/*.json; do
             [ -f "$f" ] || continue
@@ -265,10 +398,17 @@ jobs:
           driver = data["config"]["driver"]["driver_id"]
           workload = data["config"]["workload"]["benchmark_profile"]["name"]
           elapsed = data["results"]["elapsed_ms"]
-          print(f"| {driver} | {workload} | ✅ | {elapsed}ms |")
+          versions = data.get("versions", {})
+          pv = versions.get("primary_driver_version", "N/A") or "N/A"
+          sv = versions.get("secondary_driver_version")
+          version_str = pv
+          if sv:
+              sid = versions.get("secondary_driver_id", "")
+              version_str += f" ({sid}: {sv})"
+          print(f"| {driver} | {version_str} | {workload} | ✅ | {elapsed}ms |")
           EOF
           done
-          
+
           if [ "$found" = false ]; then
-            echo "| - | - | ❌ No results | - |" >> $GITHUB_STEP_SUMMARY
+            echo "| - | - | - | ❌ No results | - |" >> $GITHUB_STEP_SUMMARY
           fi
