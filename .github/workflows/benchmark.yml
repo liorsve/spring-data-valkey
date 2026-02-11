@@ -3,102 +3,168 @@ name: Benchmark
 on:
   workflow_dispatch:
     inputs:
-      clients:
-        description: 'Client configurations (comma-separated, e.g., "valkey_glide,lettuce" or "all")'
+      client:
+        description: 'Client config JSON name (e.g., "sample-valkey-glide-cme")'
         required: true
         type: string
-        default: 'valkey_glide'
-      workloads:
-        description: 'Workload configurations (comma-separated, e.g., "standard_workload,high_throughput" or "all")'
+        default: 'sample-spring-data-valkey-glide-cmd-tls'
+      workload:
+        description: 'Workload config JSON name (e.g., "sample-benchmark")'
         required: true
         type: string
-        default: 'standard_workload'
+        default: 'sample-benchmark'
+      primary_version:
+        description: 'Primary driver version or commit ID. Must be EMPTY for spring-data-valkey (auto-resolved to branch HEAD).'
+        required: false
+        type: string
+        default: ''
+      secondary_version:
+        description: 'Secondary driver version or commit ID. Must be EMPTY if driver config has no secondary driver.'
+        required: false
+        type: string
+        default: ''
 
   push:
     branches:
       - add-benchmark-ci
 
 env:
-  # Define all available configurations
-  ALL_CLIENTS: 'valkey_glide'
-  ALL_WORKLOADS: 'standard_workload'
   # Defaults for push events
-  DEFAULT_CLIENTS: 'sample-valkey-glide-cme'
-  DEFAULT_WORKLOADS: 'sample-benchmark'
+  DEFAULT_CLIENT: 'sample-spring-data-valkey-glide-cmd-tls'
+  DEFAULT_WORKLOAD: 'sample-benchmark'
+  DEFAULT_PRIMARY_VERSION: ''
+  DEFAULT_SECONDARY_VERSION: '1.0.0-rc1'
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate benchmark matrix
-        id: set-matrix
-        run: |
-          # Get input or use default
-          INPUT_CLIENTS="${{ github.event.inputs.clients }}"
-          INPUT_WORKLOADS="${{ github.event.inputs.workloads }}"
-          
-          SELECTED_CLIENTS="${INPUT_CLIENTS:-${{ env.DEFAULT_CLIENTS }}}"
-          SELECTED_WORKLOADS="${INPUT_WORKLOADS:-${{ env.DEFAULT_WORKLOADS }}}"
-          
-          echo "Selected clients: $SELECTED_CLIENTS"
-          echo "Selected workloads: $SELECTED_WORKLOADS"
-          
-          # Handle "all" keyword
-          if [ "$SELECTED_CLIENTS" == "all" ]; then
-            SELECTED_CLIENTS="${{ env.ALL_CLIENTS }}"
-          fi
-          
-          if [ "$SELECTED_WORKLOADS" == "all" ]; then
-            SELECTED_WORKLOADS="${{ env.ALL_WORKLOADS }}"
-          fi
-          
-          # Convert comma-separated to JSON array
-          # e.g., "valkey_glide,lettuce" -> ["valkey_glide","lettuce"]
-          CLIENTS_JSON=$(echo "$SELECTED_CLIENTS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -sc .)
-          WORKLOADS_JSON=$(echo "$SELECTED_WORKLOADS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -sc .)
-          
-          # Build matrix JSON
-          MATRIX=$(jq -c -n \
-            --argjson clients "$CLIENTS_JSON" \
-            --argjson workloads "$WORKLOADS_JSON" \
-            '{client: $clients, workload: $workloads}')
-          
-          echo "Generated matrix: $MATRIX"
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-
   benchmark:
-    needs: setup
     runs-on: [self-hosted, Linux, x86, ephemeral, metal]
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Display job info
+      - name: Resolve inputs
+        id: inputs
         run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            CLIENT="${{ env.DEFAULT_CLIENT }}"
+            WORKLOAD="${{ env.DEFAULT_WORKLOAD }}"
+            PRIMARY_VERSION="${{ env.DEFAULT_PRIMARY_VERSION }}"
+            SECONDARY_VERSION="${{ env.DEFAULT_SECONDARY_VERSION }}"
+          else
+            CLIENT="${{ github.event.inputs.client }}"
+            WORKLOAD="${{ github.event.inputs.workload }}"
+            PRIMARY_VERSION="${{ github.event.inputs.primary_version }}"
+            SECONDARY_VERSION="${{ github.event.inputs.secondary_version }}"
+          fi
+
+          echo "client=$CLIENT" >> $GITHUB_OUTPUT
+          echo "workload=$WORKLOAD" >> $GITHUB_OUTPUT
+          echo "primary_version=$PRIMARY_VERSION" >> $GITHUB_OUTPUT
+          echo "secondary_version=$SECONDARY_VERSION" >> $GITHUB_OUTPUT
+
           echo "========================================"
-          echo "Benchmark Job"
+          echo "Client:            $CLIENT"
+          echo "Workload:          $WORKLOAD"
+          echo "Primary version:   '${PRIMARY_VERSION}'"
+          echo "Secondary version: '${SECONDARY_VERSION}'"
           echo "========================================"
-          echo "Client: ${{ matrix.client }}"
-          echo "Workload: ${{ matrix.workload }}"
-          echo "========================================"
-          
-          echo "Workload config:"
-          cat ".github/workflows/configs/workloads/${{ matrix.workload }}.json" | jq '.phases[] | {id, completion}'
+
+      - name: Validate configs exist
+        run: |
+          CLIENT="${{ steps.inputs.outputs.client }}"
+          WORKLOAD="${{ steps.inputs.outputs.workload }}"
+
+          CLIENT_CONFIG=".github/workflows/configs/clients/${CLIENT}.json"
+          WORKLOAD_CONFIG=".github/workflows/configs/workloads/${WORKLOAD}.json"
+
+          if [ ! -f "$CLIENT_CONFIG" ]; then
+            echo "ERROR: Client config not found: $CLIENT_CONFIG"
+            exit 1
+          fi
+          echo "✓ Client config: $CLIENT_CONFIG"
+
+          if [ ! -f "$WORKLOAD_CONFIG" ]; then
+            echo "ERROR: Workload config not found: $WORKLOAD_CONFIG"
+            exit 1
+          fi
+          echo "✓ Workload config: $WORKLOAD_CONFIG"
+
+          echo "Workload phases:"
+          jq '.phases[] | {id, completion}' "$WORKLOAD_CONFIG"
+
+      - name: Validate and resolve versions
+        id: versions
+        run: |
+          CLIENT="${{ steps.inputs.outputs.client }}"
+          PRIMARY_VERSION="${{ steps.inputs.outputs.primary_version }}"
+          SECONDARY_VERSION="${{ steps.inputs.outputs.secondary_version }}"
+
+          DRIVER_CONFIG=".github/workflows/configs/clients/${CLIENT}.json"
+          DRIVER_ID=$(jq -r '.driver_id' "$DRIVER_CONFIG")
+          SECONDARY_DRIVER_ID=$(jq -r '.specific_driver_config.secondary_driver_id // empty' "$DRIVER_CONFIG")
+
+          echo "Driver ID:           $DRIVER_ID"
+          echo "Secondary Driver ID: ${SECONDARY_DRIVER_ID:-<none>}"
+
+          ERRORS=0
+
+          # Rule 1: spring-data-valkey must NOT have explicit primary version
+          if [ "$DRIVER_ID" = "spring-data-valkey" ] && [ -n "$PRIMARY_VERSION" ]; then
+            echo "ERROR: primary_version must NOT be provided when driver_id is 'spring-data-valkey'."
+            echo "       The branch HEAD commit SHA is used automatically."
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # Rule 2: no secondary driver but secondary version provided
+          if [ -z "$SECONDARY_DRIVER_ID" ] && [ -n "$SECONDARY_VERSION" ]; then
+            echo "ERROR: secondary_version was provided but client '$CLIENT' has no secondary driver."
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "========================================="
+            echo "VALIDATION FAILED: $ERRORS error(s) found"
+            echo "========================================="
+            exit 1
+          fi
+
+          # Resolve spring-data-valkey: use branch HEAD commit SHA
+          if [ "$DRIVER_ID" = "spring-data-valkey" ]; then
+            PRIMARY_VERSION="${{ github.sha }}"
+            echo "Resolved spring-data-valkey primary_version to HEAD: $PRIMARY_VERSION"
+          fi
+
+          # If no secondary driver exists, force secondary version to empty
+          if [ -z "$SECONDARY_DRIVER_ID" ]; then
+            SECONDARY_VERSION=""
+          fi
+
+          # Build versions JSON
+          VERSIONS_JSON=$(jq -c -n \
+            --arg pid "$DRIVER_ID" \
+            --arg pv "$PRIMARY_VERSION" \
+            --arg sid "$SECONDARY_DRIVER_ID" \
+            --arg sv "$SECONDARY_VERSION" \
+            '{
+              primary_driver_id: $pid,
+              primary_driver_version: (if $pv == "" then null else $pv end),
+              secondary_driver_id: (if $sid == "" then null else $sid end),
+              secondary_driver_version: (if $sv == "" then null else $sv end)
+            }')
+
+          echo ""
+          echo "Resolved versions JSON:"
+          echo "$VERSIONS_JSON" | jq .
+          echo "versions_json=$VERSIONS_JSON" >> $GITHUB_OUTPUT
+          echo "✓ All version validations passed"
 
       - name: Verify metal instance
         run: |
           echo "=== System Info ==="
           lscpu | grep "Model name"
           echo "CPU cores: $(nproc)"
-          
+
           VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
           echo "Virtualization: $VIRT"
           if [ "$VIRT" != "none" ]; then
@@ -109,7 +175,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y sysstat iproute2 python3-pip
-          
+
           # Install Python dependencies system-wide
           sudo python3 -m pip install psycopg2-binary boto3
 
@@ -119,25 +185,25 @@ jobs:
             sudo mv /tmp/FlameGraph /opt/FlameGraph
           fi
           ls /opt/FlameGraph/stackcollapse-perf.pl && echo "✓ FlameGraph tools installed"
-          
+
           CODENAME=$(lsb_release -cs)
           KERNEL=$(uname -r)
           echo "Ubuntu: $CODENAME, Kernel: $KERNEL"
-          
+
           if sudo apt-get install -y linux-tools-$(uname -r) 2>/dev/null; then
             echo "✓ Installed kernel-matched perf tools"
           else
             echo "Kernel-matched tools not available, trying HWE fallback..."
-            
+
             cd /tmp
-            
+
             KERNEL_MAJOR=$(echo $KERNEL | cut -d'.' -f1,2)
             echo "Looking for HWE tools for kernel $KERNEL_MAJOR..."
-            
+
             HWE_PKG=$(apt-cache search "linux-hwe.*tools.*${KERNEL_MAJOR}" 2>/dev/null | \
                       grep -oP "linux-hwe-[\d.]+-tools-[\d.]+-\d+" | \
                       sort -V | tail -1)
-            
+
             if [ -n "$HWE_PKG" ]; then
               echo "Found HWE package: $HWE_PKG"
               apt-get download "$HWE_PKG"
@@ -145,7 +211,7 @@ jobs:
               echo "No matching HWE package found, trying generic..."
               sudo apt-get install -y linux-tools-generic 2>/dev/null || true
             fi
-            
+
             for deb in linux-hwe*tools*.deb; do
               if [ -f "$deb" ]; then
                 echo "Extracting $deb..."
@@ -160,14 +226,14 @@ jobs:
                 break
               fi
             done
-            
+
             cd -
           fi
-          
+
           # Set perf permissions before verification
           sudo sysctl -w kernel.perf_event_paranoid=-1
           sudo sysctl -w kernel.kptr_restrict=0
-          
+
           echo ""
           echo "=== Perf Verification ==="
           which perf
@@ -177,29 +243,41 @@ jobs:
 
       - name: Run benchmark
         run: |
+          CLIENT="${{ steps.inputs.outputs.client }}"
+          WORKLOAD="${{ steps.inputs.outputs.workload }}"
+
           python3 .github/scripts/benchmark_runner.py \
-            --output "benchmark_results_${{ matrix.client }}_${{ matrix.workload }}.json" \
-            --workload-config ".github/workflows/configs/workloads/${{ matrix.workload }}.json" \
-            --driver-config ".github/workflows/configs/clients/${{ matrix.client }}.json" \
-            --project-dir ${{ github.workspace }}
+            --output "benchmark_results_${CLIENT}_${WORKLOAD}.json" \
+            --workload-config ".github/workflows/configs/workloads/${WORKLOAD}.json" \
+            --driver-config ".github/workflows/configs/clients/${CLIENT}.json" \
+            --project-dir ${{ github.workspace }} \
+            --versions-json '${{ steps.versions.outputs.versions_json }}'
 
       - name: Display results summary
         if: always()
         run: |
-          RESULT_FILE="benchmark_results_${{ matrix.client }}_${{ matrix.workload }}.json"
+          CLIENT="${{ steps.inputs.outputs.client }}"
+          WORKLOAD="${{ steps.inputs.outputs.workload }}"
+          RESULT_FILE="benchmark_results_${CLIENT}_${WORKLOAD}.json"
+
           if [ -f "$RESULT_FILE" ]; then
             echo "=== Benchmark Results Summary ==="
             python3 -c "
           import json
           with open('$RESULT_FILE') as f:
               data = json.load(f)
-          
+
           print(f\"Job ID: {data['job_id']}\")
           print(f\"Driver: {data['config']['driver']['driver_id']}\")
           print(f\"Workload: {data['config']['workload']['benchmark_profile']['name']}\")
           print(f\"Elapsed: {data['results']['elapsed_ms']}ms\")
           print()
-          
+
+          versions = data.get('versions', {})
+          print(f\"Primary:   {versions.get('primary_driver_id')} @ {versions.get('primary_driver_version', 'N/A')}\")
+          print(f\"Secondary: {versions.get('secondary_driver_id', 'N/A')} @ {versions.get('secondary_driver_version', 'N/A')}\")
+          print()
+
           steady = data['results']['phases'].get('STEADY', {})
           if steady:
               totals = steady.get('totals', {})
@@ -214,7 +292,7 @@ jobs:
                   print(f\"  {cmd}:\")
                   print(f\"    Requests: {reqs:,} (errors: {errs})\")
                   print(f\"    Latency: min={summary.get('min')} p50={summary.get('p50')} p95={summary.get('p95')} p99={summary.get('p99')} p999={summary.get('p999')} max={summary.get('max')} us\")
-          
+
           print()
           print('Perf:')
           perf = data['results']['perf']['counters']
@@ -225,50 +303,68 @@ jobs:
           if perf.get('branch_miss_rate'):
               print(f\"  Branch miss rate: {perf['branch_miss_rate']}%\")
           "
+          else
+            echo "⚠ Result file not found: $RESULT_FILE"
+          fi
+
+      - name: Generate summary report
+        if: always()
+        run: |
+          CLIENT="${{ steps.inputs.outputs.client }}"
+          WORKLOAD="${{ steps.inputs.outputs.workload }}"
+          RESULT_FILE="benchmark_results_${CLIENT}_${WORKLOAD}.json"
+
+          echo "# Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "$RESULT_FILE" ]; then
+            python3 << EOF >> $GITHUB_STEP_SUMMARY
+          import json
+          with open("$RESULT_FILE") as f:
+              data = json.load(f)
+
+          versions = data.get("versions", {})
+          driver = data["config"]["driver"]["driver_id"]
+          workload_profile = data["config"]["workload"]["benchmark_profile"]["name"]
+          elapsed = data["results"]["elapsed_ms"]
+          pv = versions.get("primary_driver_version") or "N/A"
+          sv = versions.get("secondary_driver_version")
+          sid = versions.get("secondary_driver_id")
+
+          print(f"**Driver:** {driver} @ \`{pv}\`")
+          if sid and sv:
+              print(f"**Secondary:** {sid} @ \`{sv}\`")
+          print(f"**Workload config:** \`${WORKLOAD}\` ({workload_profile})")
+          print(f"**Driver config:** \`${CLIENT}\`")
+          print(f"**Elapsed:** {elapsed}ms")
+          print()
+
+          print("| Versions | Driver | Workload | Status | Elapsed |")
+          print("|----------|--------|----------|--------|---------|")
+          version_str = pv
+          if sv:
+              version_str += f" ({sid}: {sv})"
+          print(f"| {version_str} | {driver} | \`${WORKLOAD}\` | ✅ | {elapsed}ms |")
+          print()
+
+          steady = data["results"]["phases"].get("STEADY", {})
+          if steady:
+              print("### Steady State Metrics")
+              print("| Command | Requests | Errors | p50 (μs) | p95 (μs) | p99 (μs) | p999 (μs) |")
+              print("|---------|----------|--------|----------|----------|----------|-----------|")
+              for cmd, m in steady.get("metrics", {}).items():
+                  s = m.get("latency", {}).get("summary", {})
+                  print(f"| {cmd} | {m['requests']:,} | {m['errors']} | {s.get('p50','-')} | {s.get('p95','-')} | {s.get('p99','-')} | {s.get('p999','-')} |")
+          EOF
+          else
+            echo "❌ No results found" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-${{ matrix.client }}-${{ matrix.workload }}
+          name: benchmark-results-${{ steps.inputs.outputs.client }}-${{ steps.inputs.outputs.workload }}
           path: |
-            benchmark_results_${{ matrix.client }}_${{ matrix.workload }}.json
-            benchmark_results_${{ matrix.client }}_${{ matrix.workload }}.csv
-
-  summary:
-    needs: benchmark
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: results
-          pattern: benchmark-results-*
-          merge-multiple: true
-
-      - name: Generate summary report
-        run: |
-          echo "# Benchmark Results Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Driver | Workload | Status | Elapsed |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|----------|--------|---------|" >> $GITHUB_STEP_SUMMARY
-          
-          found=false
-          for f in results/*.json; do
-            [ -f "$f" ] || continue
-            found=true
-            python3 << EOF >> $GITHUB_STEP_SUMMARY
-          import json
-          with open("$f") as file:
-              data = json.load(file)
-          driver = data["config"]["driver"]["driver_id"]
-          workload = data["config"]["workload"]["benchmark_profile"]["name"]
-          elapsed = data["results"]["elapsed_ms"]
-          print(f"| {driver} | {workload} | ✅ | {elapsed}ms |")
-          EOF
-          done
-          
-          if [ "$found" = false ]; then
-            echo "| - | - | ❌ No results | - |" >> $GITHUB_STEP_SUMMARY
-          fi
+            benchmark_results_${{ steps.inputs.outputs.client }}_${{ steps.inputs.outputs.workload }}.json
+            benchmark_results_${{ steps.inputs.outputs.client }}_${{ steps.inputs.outputs.workload }}.jsonl
