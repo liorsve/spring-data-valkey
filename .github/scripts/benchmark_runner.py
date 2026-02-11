@@ -74,12 +74,30 @@ class PostgreSQLPublisher:
         )
         print(f"✓ Connected to PostgreSQL at {self.host}:{self.port}/{self.database}")
 
+    def _migrate_add_versions_column(self):
+        """Add versions column to existing tables that lack it."""
+        check_sql = f"""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = '{self.TABLE_NAME}' AND column_name = 'versions';
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(check_sql)
+            if cursor.fetchone() is None:
+                print(f"Migrating: adding 'versions' column to {self.TABLE_NAME}...")
+                cursor.execute(f"""
+                    ALTER TABLE {self.TABLE_NAME}
+                    ADD COLUMN versions JSONB NOT NULL DEFAULT '{{}}'::jsonb;
+                """)
+                self.connection.commit()
+                print(f"✓ Added 'versions' column")
+
     def _ensure_table_exists(self):
         create_table_sql = f"""
         CREATE TABLE IF NOT EXISTS {self.TABLE_NAME} (
             id SERIAL PRIMARY KEY,
             job_id VARCHAR(100) UNIQUE NOT NULL,
             timestamp TIMESTAMPTZ NOT NULL,
+            versions JSONB NOT NULL DEFAULT '{{}}'::jsonb,
             config JSONB NOT NULL,
             results JSONB NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW()
@@ -92,28 +110,43 @@ class PostgreSQLPublisher:
             ON {self.TABLE_NAME} ((config->'driver'->>'driver_id'));
         CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_config_workload
             ON {self.TABLE_NAME} ((config->'workload'->'benchmark_profile'->>'name'));
+        CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_primary_driver
+            ON {self.TABLE_NAME} ((versions->>'primary_driver_id'));
+        CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_primary_version
+            ON {self.TABLE_NAME} ((versions->>'primary_driver_version'));
+        CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_secondary_driver
+            ON {self.TABLE_NAME} ((versions->>'secondary_driver_id'));
+        CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_secondary_version
+            ON {self.TABLE_NAME} ((versions->>'secondary_driver_version'));
         """
         with self.connection.cursor() as cursor:
             cursor.execute(create_table_sql)
         self.connection.commit()
         print(f"✓ Ensured table '{self.TABLE_NAME}' exists")
 
-    def publish(self, job_id: str, timestamp: str, config: dict, results: dict):
+    def publish(self, job_id: str, timestamp: str, versions: dict,
+                config: dict, results: dict):
         from psycopg2.extras import Json
         if not self.connection:
             self.connect()
         self._ensure_table_exists()
+        self._migrate_add_versions_column()
 
         insert_sql = f"""
-        INSERT INTO {self.TABLE_NAME} (job_id, timestamp, config, results)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO {self.TABLE_NAME} (job_id, timestamp, versions, config, results)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (job_id) DO UPDATE SET
-            timestamp = EXCLUDED.timestamp, config = EXCLUDED.config,
-            results = EXCLUDED.results, created_at = NOW()
+            timestamp = EXCLUDED.timestamp,
+            versions = EXCLUDED.versions,
+            config = EXCLUDED.config,
+            results = EXCLUDED.results,
+            created_at = NOW()
         RETURNING id
         """
         with self.connection.cursor() as cursor:
-            cursor.execute(insert_sql, (job_id, timestamp, Json(config), Json(results)))
+            cursor.execute(insert_sql, (
+                job_id, timestamp, Json(versions), Json(config), Json(results)
+            ))
             row_id = cursor.fetchone()[0]
         self.connection.commit()
         print(f"✓ Published results for job '{job_id}' (row id: {row_id})")
@@ -757,6 +790,7 @@ class BenchmarkRunner:
 
     def __init__(self, project_dir: Path, output_file: Path,
                  workload_config: dict, driver_config: dict,
+                 versions: dict,
                  skip_infra: bool = False, network_delay_ms: int = 1,
                  publish_to_db: bool = True, pg_host: str = None,
                  pg_port: int = None, pg_database: str = None,
@@ -765,6 +799,7 @@ class BenchmarkRunner:
         self.output_file = output_file
         self.workload_config = workload_config
         self.driver_config = driver_config
+        self.versions = versions
         self.skip_infra = skip_infra
         self.network_delay_ms = network_delay_ms
         self.publish_to_db = publish_to_db
@@ -787,6 +822,8 @@ class BenchmarkRunner:
                   f"cores with server")
         print(f"Core allocation: Server={self.INFRA_CORES}, "
               f"Benchmark={self.benchmark_cores}")
+
+        print(f"Versions: {json.dumps(self.versions, indent=2)}")
 
     def start_infrastructure(self):
         if self.skip_infra:
@@ -843,7 +880,8 @@ class BenchmarkRunner:
         return subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
 
-    def _publish_to_postgresql(self, config: dict, results: dict):
+    def _publish_to_postgresql(self, versions: dict, config: dict,
+                               results: dict):
         if not self.publish_to_db:
             print("Skipping PostgreSQL publication (disabled)")
             return
@@ -857,7 +895,7 @@ class BenchmarkRunner:
             with publisher:
                 publisher.publish(
                     job_id=self.job_id, timestamp=self.timestamp,
-                    config=config, results=results)
+                    versions=versions, config=config, results=results)
         except Exception as e:
             print(f"⚠ Failed to publish to PostgreSQL: {e}")
             import traceback
@@ -981,6 +1019,7 @@ class BenchmarkRunner:
                 output = {
                     "job_id": self.job_id,
                     "timestamp": self.timestamp,
+                    "versions": self.versions,
                     "config": config,
                     "results": results
                 }
@@ -991,7 +1030,7 @@ class BenchmarkRunner:
                 print(f"\nResults written to {self.output_file}")
 
                 # Publish to PostgreSQL
-                self._publish_to_postgresql(config, results)
+                self._publish_to_postgresql(self.versions, config, results)
 
             finally:
                 self.stop_infrastructure()
@@ -1007,6 +1046,13 @@ def main():
     parser.add_argument("--project-dir", type=str, default=None)
     parser.add_argument("--skip-infra", action="store_true")
     parser.add_argument("--network-delay", type=int, default=1)
+
+    parser.add_argument("--versions-json", type=str, required=True,
+                        help="JSON string with version info: "
+                             '{"primary_driver_id": "...", '
+                             '"primary_driver_version": "...", '
+                             '"secondary_driver_id": "...", '
+                             '"secondary_driver_version": "..."}')
 
     parser.add_argument("--no-publish", action="store_true",
                         help="Skip publishing to PostgreSQL")
@@ -1027,15 +1073,25 @@ def main():
     workload_config = load_json_config(workload_config_path)
     driver_config = load_json_config(driver_config_path)
 
+    # Parse versions JSON from the workflow
+    try:
+        versions = json.loads(args.versions_json)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse --versions-json: {e}")
+        print(f"  Raw value: {args.versions_json}")
+        raise SystemExit(1)
+
     print(f"Loaded workload config: "
           f"{workload_config['benchmark_profile']['name']}")
     print(f"Loaded driver config: {driver_config['driver_id']}")
+    print(f"Versions: {json.dumps(versions, indent=2)}")
 
     runner = BenchmarkRunner(
         project_dir=project_dir,
         output_file=output_file,
         workload_config=workload_config,
         driver_config=driver_config,
+        versions=versions,
         skip_infra=args.skip_infra,
         network_delay_ms=args.network_delay,
         publish_to_db=not args.no_publish,
