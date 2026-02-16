@@ -4,42 +4,42 @@ on:
   workflow_dispatch:
     inputs:
       driver:
-        description: 'Driver config (default: spring-data-valkey with valkey-glide)'
+        description: "Driver config (default: spring-data-valkey with valkey-glide)"
         required: true
         type: string
-        default: 'example-spring-data-valkey-glide-standalone'
+        default: "example-spring-data-valkey-glide-standalone"
       workload:
-        description: 'Workload config (default: example-workload)'
+        description: "Workload config (default: example-workload)"
         required: true
         type: string
-        default: 'example-workload'
+        default: "example-workload"
       primary_version:
-        description: 'Primary driver version. Leave empty for spring-data-valkey (uses branch HEAD).'
+        description: "Primary driver version. Leave empty for spring-data-valkey (uses branch HEAD)."
         required: false
         type: string
-        default: ''
+        default: ""
       secondary_version:
-        description: 'Secondary driver version (e.g., valkey-glide commit). Leave empty to use default.'
+        description: "Secondary driver version (e.g., valkey-glide commit). Leave empty to use default."
         required: false
         type: string
-        default: ''
+        default: ""
       job_id_prefix:
         description: 'Optional job ID prefix (e.g., "nightly", "pr-123")'
         required: false
         type: string
-        default: ''
+        default: ""
 
   push:
     branches:
       - add-benchmark-ci
 
 env:
-  DEFAULT_DRIVER: 'example-spring-data-valkey-glide-standalone'
-  DEFAULT_WORKLOAD: 'example-workload'
-  DEFAULT_PRIMARY_VERSION: ''
-  DEFAULT_SECONDARY_VERSION: ''
-  DEFAULT_JOB_ID_PREFIX: ''
-  RESP_BENCH_REPO: 'https://github.com/ikolomi/resp-bench.git'
+  DEFAULT_DRIVER: "example-spring-data-valkey-glide-standalone"
+  DEFAULT_WORKLOAD: "example-workload"
+  DEFAULT_PRIMARY_VERSION: ""
+  DEFAULT_SECONDARY_VERSION: ""
+  DEFAULT_JOB_ID_PREFIX: ""
+  RESP_BENCH_REPO: "https://github.com/ikolomi/resp-bench.git"
 
 jobs:
   benchmark:
@@ -57,10 +57,13 @@ jobs:
           mvn -version
 
       - name: Clone resp-bench
+        id: resp-bench
         run: |
           echo "Cloning resp-bench repository..."
           git clone --depth 1 ${{ env.RESP_BENCH_REPO }} resp-bench
-          echo "✓ resp-bench cloned to $(pwd)/resp-bench"
+          RESP_BENCH_COMMIT=$(git -C resp-bench rev-parse HEAD)
+          echo "commit=$RESP_BENCH_COMMIT" >> $GITHUB_OUTPUT
+          echo "✓ resp-bench cloned (commit: ${RESP_BENCH_COMMIT:0:7})"
 
       - name: Resolve inputs
         id: inputs
@@ -191,22 +194,7 @@ jobs:
             PRIMARY_VERSION="${{ github.sha }}"
           fi
 
-          # Build versions JSON
-          VERSIONS_JSON=$(jq -c -n \
-            --arg pid "$DRIVER_ID" \
-            --arg pv "$PRIMARY_VERSION" \
-            --arg sid "$SECONDARY_DRIVER_ID" \
-            --arg sv "$SECONDARY_VERSION" \
-            '{
-              primary_driver_id: $pid,
-              primary_driver_version: (if $pv == "" then null else $pv end),
-              secondary_driver_id: (if $sid == "" then null else $sid end),
-              secondary_driver_version: (if $sv == "" then null else $sv end)
-            }')
-
-          echo "versions_json=$VERSIONS_JSON" >> $GITHUB_OUTPUT
           echo "secondary_version=$SECONDARY_VERSION" >> $GITHUB_OUTPUT
-          echo "$VERSIONS_JSON" | jq .
 
       - name: Build spring-data-valkey
         id: build-sdv
@@ -341,10 +329,8 @@ jobs:
           echo "✓ Java benchmark built"
           ls -la java/target/*.jar
 
-
       - name: Install dependencies
         run: |
-          sudo apt-get update
           sudo apt-get install -y sysstat python3-pip
           sudo python3 -m pip install psycopg2-binary boto3 hdrhistogram
 
@@ -365,7 +351,6 @@ jobs:
           DRIVER="${{ steps.inputs.outputs.driver }}"
           WORKLOAD="${{ steps.inputs.outputs.workload }}"
           JOB_ID_PREFIX="${{ steps.inputs.outputs.job_id_prefix }}"
-          VERSIONS_JSON='${{ steps.versions.outputs.versions_json }}'
 
           PREFIX_ARG=""
           [ -n "$JOB_ID_PREFIX" ] && PREFIX_ARG="--job-id-prefix $JOB_ID_PREFIX"
@@ -375,7 +360,7 @@ jobs:
             --workload-config "resp-bench/configs/workloads/${WORKLOAD}.json" \
             --driver-config "resp-bench/configs/drivers/${DRIVER}.json" \
             --resp-bench-dir "${{ github.workspace }}/resp-bench" \
-            --versions-json "$VERSIONS_JSON" \
+            --resp-bench-commit "${{ steps.resp-bench.outputs.commit }}" \
             --s3-bucket "${{ secrets.BENCHMARK_S3_BUCKET }}" \
             --pg-host "${{ secrets.BENCHMARK_PG_HOST }}" \
             --pg-secret-name "${{ secrets.BENCHMARK_PG_SECRET_NAME }}" \
@@ -405,7 +390,7 @@ jobs:
           print(f\"Primary:   {versions.get('primary_driver_id')} @ {versions.get('primary_driver_version', 'N/A')}\")
           print(f\"Secondary: {versions.get('secondary_driver_id', 'N/A')} @ {versions.get('secondary_driver_version', 'N/A')}\")
           if versions.get('commit_id'):
-              print(f\"Commit:    {versions.get('commit_id')}\")
+              print(f\"resp-bench: {versions.get('commit_id')}\")
           print()
 
           steady = data['results']['phases'].get('STEADY', {})
@@ -453,23 +438,27 @@ jobs:
           with open("$RESULT_FILE") as f:
               data = json.load(f)
 
+          job_id = data["job_id"]
           versions = data.get("versions", {})
           driver = data["config"]["driver"]["driver_id"]
           workload_profile = data["config"]["workload"]["benchmark_profile"]["name"]
           elapsed = data["results"]["elapsed_ms"]
+          network_delay = data["results"].get("network_delay_ms", 1)
           pv = versions.get("primary_driver_version") or "N/A"
           sv = versions.get("secondary_driver_version")
           sid = versions.get("secondary_driver_id")
 
           commit_id = versions.get("commit_id")
 
+          print(f"**Job ID:** \`{job_id}\`")
           print(f"**Driver:** {driver} @ \`{pv}\`")
           if sid and sv:
               print(f"**Secondary:** {sid} @ \`{sv}\`")
           if commit_id:
-              print(f"**Commit:** \`{commit_id}\`")
+              print(f"**resp-bench:** \`{commit_id}\`")
           print(f"**Workload config:** \`${WORKLOAD}\` ({workload_profile})")
           print(f"**Driver config:** \`${DRIVER}\`")
+          print(f"**Simulated network delay:** {network_delay}ms")
           print(f"**Elapsed:** {elapsed}ms")
           print()
 

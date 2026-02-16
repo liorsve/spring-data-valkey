@@ -23,11 +23,15 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import boto3
+import psycopg2
 from hdrh.histogram import HdrHistogram
+from psycopg2.extras import Json
 
 
 def generate_job_id(prefix: str = ""):
@@ -76,9 +80,9 @@ def add_buckets_to_phase_records(phase_records: dict) -> dict:
     Process phase records and add explicit buckets to each command's latency data.
     Modifies the records in place and returns them.
     """
-    for phase_id, record in phase_records.items():
+    for _, record in phase_records.items():
         metrics = record.get("metrics", {})
-        for cmd_name, cmd_data in metrics.items():
+        for _, cmd_data in metrics.items():
             latency = cmd_data.get("latency", {})
             hdr = latency.get("hdr", {})
             payload = hdr.get("payload_b64", "")
@@ -103,14 +107,12 @@ class PostgreSQLPublisher:
         self.connection = None
 
     def _get_credentials(self) -> dict:
-        import boto3
         client = boto3.client('secretsmanager', region_name=self.region)
         response = client.get_secret_value(SecretId=self.secret_name)
         secret = json.loads(response['SecretString'])
         return {'username': secret.get('username'), 'password': secret.get('password')}
 
     def connect(self):
-        import psycopg2
         creds = self._get_credentials()
         self.connection = psycopg2.connect(
             host=self.host, port=self.port, database=self.database,
@@ -118,23 +120,6 @@ class PostgreSQLPublisher:
             sslmode='require', connect_timeout=10
         )
         print(f"✓ Connected to PostgreSQL at {self.host}:{self.port}/{self.database}")
-
-    def _migrate_add_versions_column(self):
-        """Add versions column to existing tables that lack it."""
-        check_sql = f"""
-        SELECT column_name FROM information_schema.columns
-        WHERE table_name = '{self.TABLE_NAME}' AND column_name = 'versions';
-        """
-        with self.connection.cursor() as cursor:
-            cursor.execute(check_sql)
-            if cursor.fetchone() is None:
-                print(f"Migrating: adding 'versions' column to {self.TABLE_NAME}...")
-                cursor.execute(f"""
-                    ALTER TABLE {self.TABLE_NAME}
-                    ADD COLUMN versions JSONB NOT NULL DEFAULT '{{}}'::jsonb;
-                """)
-                self.connection.commit()
-                print(f"✓ Added 'versions' column")
 
     def _ensure_table_exists(self):
         create_table_sql = f"""
@@ -147,8 +132,6 @@ class PostgreSQLPublisher:
             results JSONB NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
-        CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_job_id
-            ON {self.TABLE_NAME} (job_id);
         CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_timestamp
             ON {self.TABLE_NAME} (timestamp);
         CREATE INDEX IF NOT EXISTS idx_{self.TABLE_NAME}_config_driver
@@ -171,11 +154,9 @@ class PostgreSQLPublisher:
 
     def publish(self, job_id: str, timestamp: str, versions: dict,
                 config: dict, results: dict):
-        from psycopg2.extras import Json
         if not self.connection:
             self.connect()
         self._ensure_table_exists()
-        self._migrate_add_versions_column()
 
         insert_sql = f"""
         INSERT INTO {self.TABLE_NAME} (job_id, timestamp, versions, config, results)
@@ -206,7 +187,7 @@ class PostgreSQLPublisher:
         self.connect()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         self.close()
         return False
 
@@ -356,7 +337,7 @@ class VarianceControl:
 
 
 class MetricsWatcher:
-    """Watches a JSONL metrics file for phase transitions using tail -f."""
+    """Watches a NDJSON metrics file for phase transitions using tail -f."""
 
     def __init__(self, metrics_path: Path):
         self.metrics_path = metrics_path
@@ -368,9 +349,13 @@ class MetricsWatcher:
         self.watcher_thread: Optional[threading.Thread] = None
         self.phase_records: dict = {}
 
-    def start(self):
+    def start(self, timeout_seconds: int = 600):
         print(f"Waiting for metrics file: {self.metrics_path}")
+        start_time = time.time()
         while not self.metrics_path.exists():
+            if time.time() - start_time > timeout_seconds:
+                raise RuntimeError(
+                    f"Timeout waiting for metrics file: {self.metrics_path}")
             time.sleep(0.1)
 
         self.tail_process = subprocess.Popen(
@@ -473,7 +458,6 @@ class MonitoringManager:
         self.output_files = {}
         self._file_handles = {}
         self.hardware_perf_available = False
-        self.async_profiler_process = None
         self.collapsed_stacks_file = None
 
     def _check_hardware_perf_events(self) -> bool:
@@ -619,9 +603,7 @@ class MonitoringManager:
             print("⚠ Collapsed stacks file is empty")
             return None
 
-        line_count = sum(1 for _ in open(self.collapsed_stacks_file))
-        print(f"✓ Collapsed stacks: {line_count} lines, "
-              f"{self.collapsed_stacks_file.stat().st_size} bytes")
+        print(f"✓ Collapsed stacks: {self.collapsed_stacks_file.stat().st_size} bytes")
         self.output_files["collapsed_stacks"] = self.collapsed_stacks_file
         return self.collapsed_stacks_file
 
@@ -894,9 +876,8 @@ class BenchmarkOrchestrator:
     INFRA_CORES = "0-3"
     AWS_REGION = "us-east-1"
 
-    def __init__(self, resp_bench_dir: Path, output_file: Path,
+    def __init__(self, resp_bench_dir: Path, resp_bench_commit: str, output_file: Path,
                  workload_config_path: Path, driver_config_path: Path,
-                 versions: dict,
                  s3_bucket: str,
                  job_id_prefix: str = "",
                  skip_infra: bool = False, network_delay_ms: int = 1,
@@ -904,12 +885,12 @@ class BenchmarkOrchestrator:
                  pg_port: int = 5432, pg_database: str = "postgres",
                  pg_secret_name: str = None):
         self.resp_bench_dir = resp_bench_dir
+        self.resp_bench_commit = resp_bench_commit
         self.output_file = output_file
         self.workload_config_path = workload_config_path
         self.driver_config_path = driver_config_path
         self.workload_config = load_json_config(workload_config_path)
         self.driver_config = load_json_config(driver_config_path)
-        self.versions = versions
         self.skip_infra = skip_infra
         self.network_delay_ms = network_delay_ms
         self.publish_to_db = publish_to_db
@@ -1069,9 +1050,7 @@ class BenchmarkOrchestrator:
         cmd = [
             "taskset", "-c", self.benchmark_cores,
             "java",
-            "-XX:+PreserveFramePointer",          # Better stack walking for profilers
-            "-XX:+UnlockDiagnosticVMOptions",
-            "-XX:+DebugNonSafepoints",            # Show inlined methods in flamegraph
+            "-XX:+EnableDynamicAgentLoading",  # Allow async-profiler to attach
             "-jar", str(self.java_jar),
             "--server", server,
             "--driver", str(self.driver_config_path),
@@ -1079,10 +1058,9 @@ class BenchmarkOrchestrator:
             "--metrics", str(output_metrics)
         ]
 
-        # Add commit ID if available
-        commit_id = self.versions.get("primary_driver_version")
-        if commit_id:
-            cmd.extend(["--commit-id", commit_id])
+        # Add resp-bench commit ID if available
+        if self.resp_bench_commit:
+            cmd.extend(["--commit-id", self.resp_bench_commit])
 
         print(f"Starting Java benchmark on cores {self.benchmark_cores}")
         print(f"  Server: {server}")
@@ -1111,13 +1089,11 @@ class BenchmarkOrchestrator:
                     versions=versions, config=config, results=results)
         except Exception as e:
             print(f"⚠ Failed to publish to PostgreSQL: {e}")
-            import traceback
             traceback.print_exc()
 
     def _upload_to_s3(self, local_path: Path,
                       s3_key: str) -> Optional[str]:
         try:
-            import boto3
             s3_client = boto3.client('s3', region_name=self.AWS_REGION)
             s3_client.upload_file(str(local_path), self.s3_bucket, s3_key)
             s3_url = f"s3://{self.s3_bucket}/{s3_key}"
@@ -1125,13 +1101,13 @@ class BenchmarkOrchestrator:
             return s3_url
         except Exception as e:
             print(f"⚠ Failed to upload to S3: {e}")
-            import traceback
             traceback.print_exc()
             return None
 
     def run(self):
         """Execute the full benchmark workflow"""
-        with tempfile.TemporaryDirectory() as tmpdir:
+        # write to the /dev/shm dir as it's in the ram, eliminating disc i/o. 
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as tmpdir:
             work_dir = Path(tmpdir)
             benchmark_metrics = work_dir / "benchmark_metrics.ndjson"
 
@@ -1230,6 +1206,7 @@ class BenchmarkOrchestrator:
 
                 results = {
                     "elapsed_ms": elapsed_ms,
+                    "network_delay_ms": self.network_delay_ms,
                     "phases": all_phases,
                     "perf": {
                         "counters": perf_counters,
@@ -1273,12 +1250,10 @@ def main():
     parser.add_argument("--driver-config", type=str, required=True)
     parser.add_argument("--resp-bench-dir", type=str, required=True,
                         help="Path to the cloned resp-bench repository")
+    parser.add_argument("--resp-bench-commit", type=str, required=True,
+                        help="Git commit ID of the resp-bench repository")
     parser.add_argument("--skip-infra", action="store_true")
-    parser.add_argument("--network-delay", type=int, default=1)
-
-    parser.add_argument("--versions-json", type=str, default="{}",
-                        help="JSON string with version info (optional, versions extracted from resp-bench output)")
-
+    parser.add_argument("--network-delay-ms", type=int, default=1)
     parser.add_argument("--job-id-prefix", type=str, default="",
                         help="Optional prefix for the job ID "
                              "(e.g., 'regression', 'nightly', 'pr-123')")
@@ -1303,24 +1278,16 @@ def main():
     workload_config_path = Path(args.workload_config)
     driver_config_path = Path(args.driver_config)
 
-    # Parse versions JSON from the workflow
-    try:
-        versions = json.loads(args.versions_json)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse --versions-json: {e}")
-        print(f"  Raw value: {args.versions_json}")
-        raise SystemExit(1)
-
     orchestrator = BenchmarkOrchestrator(
         resp_bench_dir=resp_bench_dir,
+        resp_bench_commit=args.resp_bench_commit,
         output_file=output_file,
         workload_config_path=workload_config_path,
         driver_config_path=driver_config_path,
-        versions=versions,
         s3_bucket=args.s3_bucket,
         job_id_prefix=args.job_id_prefix,
         skip_infra=args.skip_infra,
-        network_delay_ms=args.network_delay,
+        network_delay_ms=args.network_delay_ms,
         publish_to_db=not args.no_publish,
         pg_host=args.pg_host,
         pg_port=args.pg_port,
