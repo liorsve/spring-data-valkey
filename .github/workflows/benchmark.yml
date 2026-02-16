@@ -279,9 +279,9 @@ jobs:
           GLIDE_VERSION="${COMMIT_ID:0:8}-SNAPSHOT"
           echo "Building valkey-glide version: $GLIDE_VERSION"
 
-          # build
+          # build with debug symbols for flamegraph visibility
           cd java
-          ./gradlew :client:buildAll -x test
+          CARGO_PROFILE_RELEASE_DEBUG=true ./gradlew :client:buildAll -x test
           GLIDE_RELEASE_VERSION="$GLIDE_VERSION" ./gradlew publishToMavenLocal -x test
 
           echo "✓ Built valkey-glide $GLIDE_VERSION from commit $COMMIT_ID"
@@ -360,7 +360,7 @@ jobs:
             sudo apt-get install -y linux-tools-generic 2>/dev/null || true
           command -v perf && perf --version || echo "perf not available"
 
-      - name: Run benchmark
+      - name: Run benchmark and publish results to DB
         run: |
           DRIVER="${{ steps.inputs.outputs.driver }}"
           WORKLOAD="${{ steps.inputs.outputs.workload }}"
@@ -370,12 +370,15 @@ jobs:
           PREFIX_ARG=""
           [ -n "$JOB_ID_PREFIX" ] && PREFIX_ARG="--job-id-prefix $JOB_ID_PREFIX"
 
-          python3 -u .github/scripts/benchmark_runner.py \
+          python3 -u .github/workflows/benchmark_orchestrator.py \
             --output "benchmark_results_${DRIVER}_${WORKLOAD}.json" \
             --workload-config "resp-bench/configs/workloads/${WORKLOAD}.json" \
             --driver-config "resp-bench/configs/drivers/${DRIVER}.json" \
             --resp-bench-dir "${{ github.workspace }}/resp-bench" \
             --versions-json "$VERSIONS_JSON" \
+            --s3-bucket "${{ secrets.BENCHMARK_S3_BUCKET }}" \
+            --pg-host "${{ secrets.BENCHMARK_PG_HOST }}" \
+            --pg-secret-name "${{ secrets.BENCHMARK_PG_SECRET_NAME }}" \
             $PREFIX_ARG
 
       - name: Display results summary
