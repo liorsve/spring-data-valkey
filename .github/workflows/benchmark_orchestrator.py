@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark runner that orchestrates:
+Benchmark orchestrator:
 1. Starting Valkey infrastructure
 2. Running benchmark application
 3. Collecting system metrics (perf, CPU, disk I/O, network)
@@ -888,29 +888,21 @@ def parse_perf_stat(filepath: Path, hardware_available: bool) -> dict:
     return result
 
 
-class BenchmarkRunner:
+class BenchmarkOrchestrator:
     """Main benchmark orchestration class"""
 
     INFRA_CORES = "0-3"
-    S3_BUCKET = "java-benchmarks-artifacts"
-    S3_REGION = "us-east-1"
-
-    DEFAULT_PG_HOST = \
-        "database-1.cluster-ceoc7e0aaxvr.us-east-1.rds.amazonaws.com"
-    DEFAULT_PG_PORT = 5432
-    DEFAULT_PG_DATABASE = "postgres"
-    DEFAULT_PG_SECRET_NAME = \
-        "rds!cluster-7be93190-f497-428f-85e5-c33b16781f63"
-    DEFAULT_PG_REGION = "us-east-1"
+    AWS_REGION = "us-east-1"
 
     def __init__(self, resp_bench_dir: Path, output_file: Path,
                  workload_config_path: Path, driver_config_path: Path,
                  versions: dict,
+                 s3_bucket: str,
                  job_id_prefix: str = "",
                  skip_infra: bool = False, network_delay_ms: int = 1,
                  publish_to_db: bool = True, pg_host: str = None,
-                 pg_port: int = None, pg_database: str = None,
-                 pg_secret_name: str = None, pg_region: str = None):
+                 pg_port: int = 5432, pg_database: str = "postgres",
+                 pg_secret_name: str = None):
         self.resp_bench_dir = resp_bench_dir
         self.output_file = output_file
         self.workload_config_path = workload_config_path
@@ -923,17 +915,18 @@ class BenchmarkRunner:
         self.publish_to_db = publish_to_db
         self.job_id = generate_job_id(prefix=job_id_prefix)
         self.timestamp = get_timestamp()
+
+        self.s3_bucket = s3_bucket
+        self.pg_host = pg_host
+        self.pg_port = pg_port
+        self.pg_database = pg_database
+        self.pg_secret_name = pg_secret_name
+
+        # Apply variance control
         self.variance_control = VarianceControl()
+        self.variance_control.setup(network_delay_ms=network_delay_ms)
 
-        self.pg_host = pg_host or self.DEFAULT_PG_HOST
-        self.pg_port = pg_port or self.DEFAULT_PG_PORT
-        self.pg_database = pg_database or self.DEFAULT_PG_DATABASE
-        self.pg_secret_name = pg_secret_name or self.DEFAULT_PG_SECRET_NAME
-        self.pg_region = pg_region or self.DEFAULT_PG_REGION
-
-        # Java JAR path - find the shaded JAR dynamically
-        self.java_jar = self._find_java_jar()
-
+        # Calculate core allocation after SMT is disabled
         cpu_count = os.cpu_count() or 8
         if cpu_count > 4:
             self.benchmark_cores = f"4-{cpu_count - 1}"
@@ -943,6 +936,9 @@ class BenchmarkRunner:
                   f"cores with server")
         print(f"Core allocation: Server={self.INFRA_CORES}, "
               f"Benchmark={self.benchmark_cores}")
+
+        # Java JAR path - find the shaded JAR dynamically
+        self.java_jar = self._find_java_jar()
 
     def _find_java_jar(self) -> Path:
         """Find the benchmark JAR file dynamically."""
@@ -1072,7 +1068,11 @@ class BenchmarkRunner:
 
         cmd = [
             "taskset", "-c", self.benchmark_cores,
-            "java", "-jar", str(self.java_jar),
+            "java",
+            "-XX:+PreserveFramePointer",          # Better stack walking for profilers
+            "-XX:+UnlockDiagnosticVMOptions",
+            "-XX:+DebugNonSafepoints",            # Show inlined methods in flamegraph
+            "-jar", str(self.java_jar),
             "--server", server,
             "--driver", str(self.driver_config_path),
             "--workload", str(self.workload_config_path),
@@ -1104,7 +1104,7 @@ class BenchmarkRunner:
             publisher = PostgreSQLPublisher(
                 host=self.pg_host, port=self.pg_port,
                 database=self.pg_database,
-                secret_name=self.pg_secret_name, region=self.pg_region)
+                secret_name=self.pg_secret_name, region=self.AWS_REGION)
             with publisher:
                 publisher.publish(
                     job_id=self.job_id, timestamp=self.timestamp,
@@ -1118,9 +1118,9 @@ class BenchmarkRunner:
                       s3_key: str) -> Optional[str]:
         try:
             import boto3
-            s3_client = boto3.client('s3', region_name=self.S3_REGION)
-            s3_client.upload_file(str(local_path), self.S3_BUCKET, s3_key)
-            s3_url = f"s3://{self.S3_BUCKET}/{s3_key}"
+            s3_client = boto3.client('s3', region_name=self.AWS_REGION)
+            s3_client.upload_file(str(local_path), self.s3_bucket, s3_key)
+            s3_url = f"s3://{self.s3_bucket}/{s3_key}"
             print(f"✓ Uploaded to {s3_url}")
             return s3_url
         except Exception as e:
@@ -1131,8 +1131,6 @@ class BenchmarkRunner:
 
     def run(self):
         """Execute the full benchmark workflow"""
-        self.variance_control.setup(network_delay_ms=self.network_delay_ms)
-
         with tempfile.TemporaryDirectory() as tmpdir:
             work_dir = Path(tmpdir)
             benchmark_metrics = work_dir / "benchmark_metrics.ndjson"
@@ -1268,7 +1266,7 @@ class BenchmarkRunner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark runner")
+    parser = argparse.ArgumentParser(description="Benchmark orchestrator")
     parser.add_argument("--output", type=str,
                         default="benchmark_results.json")
     parser.add_argument("--workload-config", type=str, required=True)
@@ -1285,13 +1283,18 @@ def main():
                         help="Optional prefix for the job ID "
                              "(e.g., 'regression', 'nightly', 'pr-123')")
 
+    parser.add_argument("--s3-bucket", type=str, required=True,
+                        help="S3 bucket for uploading artifacts")
     parser.add_argument("--no-publish", action="store_true",
                         help="Skip publishing to PostgreSQL")
-    parser.add_argument("--pg-host", type=str, default=None)
-    parser.add_argument("--pg-port", type=int, default=None)
-    parser.add_argument("--pg-database", type=str, default=None)
-    parser.add_argument("--pg-secret-name", type=str, default=None)
-    parser.add_argument("--pg-region", type=str, default=None)
+    parser.add_argument("--pg-host", type=str, default=None,
+                        help="PostgreSQL host")
+    parser.add_argument("--pg-port", type=int, default=5432,
+                        help="PostgreSQL port")
+    parser.add_argument("--pg-database", type=str, default="postgres",
+                        help="PostgreSQL database")
+    parser.add_argument("--pg-secret-name", type=str, default=None,
+                        help="AWS Secrets Manager secret name for DB credentials")
 
     args = parser.parse_args()
 
@@ -1308,12 +1311,13 @@ def main():
         print(f"  Raw value: {args.versions_json}")
         raise SystemExit(1)
 
-    runner = BenchmarkRunner(
+    orchestrator = BenchmarkOrchestrator(
         resp_bench_dir=resp_bench_dir,
         output_file=output_file,
         workload_config_path=workload_config_path,
         driver_config_path=driver_config_path,
         versions=versions,
+        s3_bucket=args.s3_bucket,
         job_id_prefix=args.job_id_prefix,
         skip_infra=args.skip_infra,
         network_delay_ms=args.network_delay,
@@ -1321,15 +1325,14 @@ def main():
         pg_host=args.pg_host,
         pg_port=args.pg_port,
         pg_database=args.pg_database,
-        pg_secret_name=args.pg_secret_name,
-        pg_region=args.pg_region
+        pg_secret_name=args.pg_secret_name
     )
 
     print(f"Loaded workload config: "
-          f"{runner.workload_config['benchmark_profile']['name']}")
-    print(f"Loaded driver config: {runner.driver_config['driver_id']}")
+          f"{orchestrator.workload_config['benchmark_profile']['name']}")
+    print(f"Loaded driver config: {orchestrator.driver_config['driver_id']}")
 
-    runner.run()
+    orchestrator.run()
 
 
 if __name__ == "__main__":
