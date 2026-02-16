@@ -416,7 +416,7 @@ class MetricsWatcher:
 
 class MonitoringManager:
     """Manages background monitoring processes"""
-    FLAMEGRAPH_PATH = "/opt/FlameGraph"
+    ASYNC_PROFILER_PATH = "/opt/async-profiler/bin"
 
     def __init__(self, work_dir: Path):
         self.work_dir = work_dir
@@ -424,8 +424,8 @@ class MonitoringManager:
         self.output_files = {}
         self._file_handles = {}
         self.hardware_perf_available = False
-        self.perf_record_process = None
-        self.perf_data_file = None
+        self.async_profiler_process = None
+        self.collapsed_stacks_file = None
 
     def _check_hardware_perf_events(self) -> bool:
         try:
@@ -441,11 +441,11 @@ class MonitoringManager:
             print(f"Hardware perf check failed: {e}")
             return False
 
-    def _ensure_flamegraph_tools(self) -> bool:
-        stackcollapse = Path(self.FLAMEGRAPH_PATH) / "stackcollapse-perf.pl"
-        if stackcollapse.exists():
+    def _ensure_async_profiler(self) -> bool:
+        asprof = Path(self.ASYNC_PROFILER_PATH) / "asprof"
+        if asprof.exists():
             return True
-        print(f"⚠ FlameGraph tools not found at {self.FLAMEGRAPH_PATH}")
+        print(f"⚠ async-profiler not found at {self.ASYNC_PROFILER_PATH}")
         return False
 
     def start_mpstat(self):
@@ -492,82 +492,103 @@ class MonitoringManager:
         self.processes["perf_stat"] = proc
         print(f"Started perf stat on PID {pid}")
 
-    def start_perf_record(self, pid: int):
-        self.perf_data_file = self.work_dir / "perf_record.data"
-        cmd = ["perf", "record", "-F", "99", "-p", str(pid), "-g",
-               "-o", str(self.perf_data_file)]
-        self.perf_record_process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"Started perf record on PID {pid}")
+    def start_async_profiler(self, pid: int):
+        """Start async-profiler to collect Java flame graph data."""
+        if not self._ensure_async_profiler():
+            print("⚠ Skipping async-profiler (not available)")
+            return
 
-    def stop_perf_record(self):
-        if self.perf_record_process:
-            try:
-                if self.perf_record_process.poll() is None:
-                    self.perf_record_process.send_signal(signal.SIGINT)
-                    self.perf_record_process.wait(timeout=10)
-                print("✓ Perf record stopped")
-            except subprocess.TimeoutExpired:
-                self.perf_record_process.kill()
-                self.perf_record_process.wait()
-                print("⚠ Perf record killed (timeout)")
-            except Exception as e:
-                print(f"⚠ Error stopping perf record: {e}")
-            finally:
-                self.perf_record_process = None
+        self.collapsed_stacks_file = self.work_dir / "collapsed.txt"
+        asprof = Path(self.ASYNC_PROFILER_PATH) / "asprof"
 
-    def generate_collapsed_stacks(self) -> Optional[Path]:
-        if not self.perf_data_file or not self.perf_data_file.exists():
-            print("⚠ No perf data file found")
-            return None
-        if self.perf_data_file.stat().st_size == 0:
-            print("⚠ Perf data file is empty")
-            return None
-        if not self._ensure_flamegraph_tools():
-            return None
-
-        collapsed_file = self.work_dir / "collapsed.txt"
-        stackcollapse = Path(self.FLAMEGRAPH_PATH) / "stackcollapse-perf.pl"
+        # Start async-profiler in the background
+        # -e cpu: profile CPU usage
+        # -i 1ms: sampling interval
+        # -o collapsed: output in collapsed stack format for flame graphs
+        # -f: output file
+        cmd = [
+            str(asprof),
+            "-e", "cpu",
+            "-i", "1ms",
+            "-o", "collapsed",
+            "-f", str(self.collapsed_stacks_file),
+            "start",
+            str(pid)
+        ]
 
         try:
-            print("Generating collapsed stacks...")
-            perf_script = subprocess.Popen(
-                ["perf", "script", "-i", str(self.perf_data_file)],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            with open(collapsed_file, "w") as f:
-                stackcollapse_proc = subprocess.Popen(
-                    ["perl", str(stackcollapse)],
-                    stdin=perf_script.stdout, stdout=f, stderr=subprocess.DEVNULL)
-                perf_script.stdout.close()
-                stackcollapse_proc.wait(timeout=60)
-            perf_script.wait(timeout=10)
-
-            if collapsed_file.exists() and collapsed_file.stat().st_size > 0:
-                line_count = sum(1 for _ in open(collapsed_file))
-                print(f"✓ Generated collapsed stacks: {line_count} lines, "
-                      f"{collapsed_file.stat().st_size} bytes")
-                self.output_files["collapsed_stacks"] = collapsed_file
-                return collapsed_file
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                print(f"✓ Started async-profiler on PID {pid}")
             else:
-                print("⚠ Collapsed stacks file is empty")
-                return None
-        except subprocess.TimeoutExpired:
-            print("⚠ Timeout generating collapsed stacks")
-            return None
+                print(f"⚠ Failed to start async-profiler: {result.stderr}")
+                self.collapsed_stacks_file = None
         except Exception as e:
-            print(f"⚠ Failed to generate collapsed stacks: {e}")
+            print(f"⚠ Error starting async-profiler: {e}")
+            self.collapsed_stacks_file = None
+
+    def stop_async_profiler(self, pid: int):
+        """Stop async-profiler and collect the flame graph data."""
+        if not self.collapsed_stacks_file:
+            return
+
+        asprof = Path(self.ASYNC_PROFILER_PATH) / "asprof"
+        if not asprof.exists():
+            return
+
+        # Must include output options in stop command to dump the data
+        cmd = [
+            str(asprof),
+            "stop",
+            "-o", "collapsed",
+            "-f", str(self.collapsed_stacks_file),
+            str(pid)
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                print("✓ async-profiler stopped")
+            else:
+                print(f"⚠ Error stopping async-profiler: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            print("⚠ Timeout stopping async-profiler")
+        except Exception as e:
+            print(f"⚠ Error stopping async-profiler: {e}")
+
+    def get_collapsed_stacks(self) -> Optional[Path]:
+        """Get the collapsed stacks file generated by async-profiler."""
+        if not self.collapsed_stacks_file:
+            print("⚠ No collapsed stacks file (async-profiler not started)")
             return None
+
+        if not self.collapsed_stacks_file.exists():
+            print("⚠ Collapsed stacks file not found")
+            return None
+
+        if self.collapsed_stacks_file.stat().st_size == 0:
+            print("⚠ Collapsed stacks file is empty")
+            return None
+
+        line_count = sum(1 for _ in open(self.collapsed_stacks_file))
+        print(f"✓ Collapsed stacks: {line_count} lines, "
+              f"{self.collapsed_stacks_file.stat().st_size} bytes")
+        self.output_files["collapsed_stacks"] = self.collapsed_stacks_file
+        return self.collapsed_stacks_file
 
     def start_all(self, benchmark_pid: int):
+        self.benchmark_pid = benchmark_pid  # Store for stop_all
         self.start_mpstat()
         self.start_iostat()
         self.start_sar_network()
         self.start_perf_stat(benchmark_pid)
-        self.start_perf_record(benchmark_pid)
+        self.start_async_profiler(benchmark_pid)
         print("All monitoring processes started")
 
     def stop_all(self):
-        self.stop_perf_record()
+        # Stop async-profiler first to collect flame graph data
+        if hasattr(self, 'benchmark_pid'):
+            self.stop_async_profiler(self.benchmark_pid)
 
         if "perf_stat" in self.processes:
             perf_proc = self.processes.pop("perf_stat")
@@ -1092,11 +1113,11 @@ class BenchmarkRunner:
                 stdout, stderr = benchmark_proc.communicate(timeout=10)
                 print(f"Benchmark stderr:\n{stderr.decode()}")
 
-                # Generate collapsed stacks and upload to S3
+                # Get collapsed stacks from async-profiler and upload to S3
                 collapsed_stacks_url = None
                 nested_set_flamegraph_url = None
-                print("\nGenerating flame graph data...")
-                collapsed_file = monitor.generate_collapsed_stacks()
+                print("\nCollecting flame graph data from async-profiler...")
+                collapsed_file = monitor.get_collapsed_stacks()
                 if collapsed_file:
                     s3_key = f"{self.job_id}/collapsed.txt"
                     collapsed_stacks_url = self._upload_to_s3(
